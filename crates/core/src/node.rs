@@ -33,7 +33,18 @@ impl Node {
 
         // Store de blobs en disco (PC host) — en móvil se usará igual
         // pero sin hacer `add_path` de lo marcado StreamOnly.
-        let fs_store = iroh_blobs::store::fs::FsStore::load(data_dir.join("blobs")).await?;
+        // GC cada 60s: lo que la web des-pinea (`DELETE /api/files/:hash`)
+        // libera disco en el siguiente ciclo; sin esto los blobs huérfanos
+        // quedarían ocupando espacio para siempre.
+        let blobs_dir = data_dir.join("blobs");
+        let mut fs_opts = iroh_blobs::store::fs::options::Options::new(&blobs_dir);
+        fs_opts.gc = Some(iroh_blobs::store::GcConfig {
+            interval: std::time::Duration::from_secs(60),
+            add_protected: None,
+        });
+        let fs_store =
+            iroh_blobs::store::fs::FsStore::load_with_opts(blobs_dir.join("blobs.db"), fs_opts)
+                .await?;
         let blobs_store: BlobsStore = fs_store.into();
         let blobs = BlobsProtocol::new(&blobs_store, None);
 

@@ -62,17 +62,42 @@ refresca solo con `tailscale cert --min-validity 720h`, sin sudo.)
 Requisitos en el celular: app **Tailscale** instalada, logueada en la **misma tailnet** y en estado activo
 (`tailscale status` en el PC debe mostrarlo como online). Nada más que instalar: es una web.
 
-1. En el PC, arranca el servidor con tu video:
-   ```bash
-   ./target/debug/p2p-serve ./mi-video.mp4 --data-dir ./data-nodo --policy stream_only
-   ```
+1. En el PC, arranca el servidor (el video inicial es opcional):
+    ```bash
+    tsinas on     # enciende la web en segundo plano (equivale al p2p-serve largo)
+    tsinas off    # la apaga
+    ```
+    Detalle manual (si prefieres el comando largo):
+    ```bash
+    ./target/debug/p2p-serve ./mi-video.mp4 --data-dir ./data-nodo --policy stream_only
+    # o sin archivo: todo se añade después desde la web
+    ./target/debug/p2p-serve --data-dir ./data-nodo
+    ```
 2. En el celular (Chrome Android), abre `https://uriel-1.tail7345d6.ts.net:37491/`.
 3. Verás la lista del baúl: toca **▶ Reproducir**, prueba adelantar/retroceder (seek usa rangos).
 4. Opcional: ⋮ > **Agregar a pantalla principal** (PWA; el service worker solo cachea la
    shell, nunca los videos ni la API).
 
 Flags útiles: `--port`, `--bind IP`, `--domain` (por defecto los de Dev),
-`--http-local` (HTTP loopback efímero sin TLS, solo este PC).
+`--http-local` (HTTP loopback efímero sin TLS, solo este PC),
+`--media-roots DIR1,DIR2` (restringe qué rutas aceptan los endpoints de escritura).
+
+## Añadir videos desde la web (sin consola)
+
+Abre la UI (desde el PC o desde el móvil) y ve a la pestaña **Añadir**:
+
+- **Subir desde este dispositivo**: selector de archivos del navegador/móvil →
+  el archivo se envía al servidor y aparece en la lista (tope 8 GiB por archivo).
+- **Archivo**: pega la ruta del servidor (`/home/uriel/Videos/cap07.mkv`) → aparece en la lista.
+- **Carpeta**: pega la carpeta (`/home/uriel/Anime/Temporada1`) → **Escanear** lista
+  solo los vídeos (ignora `.txt`, etc.), en orden natural (`cap2 < cap10`), con
+  barra de progreso (el hasheo de 24 MKV tarda minutos y corre en background).
+- **Quitar**: cada fila tiene botón que la saca de la lista y des-pinea el blob;
+  el espacio se libera en ~1 min (GC cada 60 s). Nunca borra tu archivo original.
+
+Sin roles: no hay usuarios ni admin. La red tailnet ya es privada (solo tus
+dispositivos) y cifrada (WireGuard + QUIC/TLS de iroh), así que cualquier
+dispositivo conectado puede gestionar la biblioteca.
 
 Si algo falla: puerto ocupado → el arranque avisa y debes cerrar la otra instancia;
 cert ausente/expirado → el arranque imprime el comando `sudo tailscale cert` a repetir;

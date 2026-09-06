@@ -8,15 +8,20 @@
 //! GET /stream/<hash> con Range, sin persistir a disco.
 
 use std::path::PathBuf;
+use std::str::FromStr;
 
+use iroh_blobs::Hash;
 use iroh_docs::api::protocol::{AddrInfoOptions, ShareMode};
-use p2p_nube_core::{db::FileRow, gateway::Gateway, tailnet, Node, Policy};
+use p2p_nube_core::{db::FileRow, gateway::Gateway, tailnet, Library, Node, Policy};
 use p2p_nube_vault::{guess_mime, SharedFile};
 
 fn usage() -> ! {
     eprintln!(
-        "Uso: p2p-serve <ARCHIVO> [--data-dir DIR] [--policy stream_only|mirror|host_only]\n\
+        "Uso: p2p-serve [ARCHIVO] [--data-dir DIR] [--policy stream_only|mirror|host_only]\n\
          [--port 37491] [--bind IP] [--domain DOM] [--http-local]\n\
+         [--media-roots DIR1,DIR2]  (rutas permitidas para añadir desde la web; vacío = sin restricción)\n\
+         Sin ARCHIVO arranca con la biblioteca vacía y los vídeos se añaden\n\
+         desde la web (pestaña Añadir (host)).\n\
          Ejemplo: p2p-serve ./video.mp4 --data-dir ./data-nodo --policy stream_only\n\
          Por defecto sirve HTTPS en https://<domain>:<port> bindeado a tu IP tailnet (modo Dev)."
     );
@@ -85,17 +90,22 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let mut args = std::env::args().skip(1);
-    let file: PathBuf = match args.next() {
-        Some(a) if !a.starts_with("--") => PathBuf::from(a),
-        _ => usage(),
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    // Archivo inicial opcional: primer argumento si no es un flag.
+    // Sin él se arranca con la biblioteca vacía y todo se añade desde la web.
+    let mut rest: Vec<String> = raw;
+    let file: Option<PathBuf> = match rest.first() {
+        Some(a) if !a.starts_with("--") => Some(PathBuf::from(rest.remove(0))),
+        _ => None,
     };
+    let mut args = rest.into_iter();
     let mut data_dir = PathBuf::from("./data-nodo");
     let mut policy = Policy::StreamOnly;
     let mut port: u16 = DEV_PORT_DEFAULT;
     let mut bind: Option<String> = None;
     let mut domain: Option<String> = None;
     let mut http_local = false;
+    let mut media_roots_raw: Option<String> = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--data-dir" => data_dir = PathBuf::from(args.next().unwrap_or_else(|| usage())),
@@ -112,23 +122,32 @@ async fn main() -> anyhow::Result<()> {
             "--bind" => bind = Some(args.next().unwrap_or_else(|| usage())),
             "--domain" => domain = Some(args.next().unwrap_or_else(|| usage())),
             "--http-local" => http_local = true,
+            "--media-roots" => media_roots_raw = Some(args.next().unwrap_or_else(|| usage())),
             _ => usage(),
+        }
+    }
+
+    // Raíces permitidas para los endpoints de escritura de la web.
+    let mut media_roots: Vec<PathBuf> = Vec::new();
+    if let Some(raw) = media_roots_raw {
+        for r in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            match std::fs::canonicalize(r) {
+                Ok(p) => media_roots.push(p),
+                Err(_) => anyhow::bail!("media-root no existe: {r}"),
+            }
         }
     }
 
     // iroh-blobs exige rutas absolutas: resolvemos antes de crear el nodo.
     // `canonicalize` además valida que el archivo existe (resuelve symlinks).
-    let file: PathBuf = match std::fs::canonicalize(&file) {
-        Ok(p) => p,
-        Err(_) => anyhow::bail!("no existe el archivo: {}", file.display()),
+    let file: Option<PathBuf> = match file {
+        Some(f) => match std::fs::canonicalize(&f) {
+            Ok(p) => Some(p),
+            Err(_) => anyhow::bail!("no existe el archivo: {}", f.display()),
+        },
+        None => None,
     };
     let data_dir: PathBuf = std::path::absolute(&data_dir)?;
-
-    let size = std::fs::metadata(&file)?.len();
-    let name = file
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "archivo".into());
 
     let node = Node::spawn(data_dir.clone()).await?;
     println!("endpoint id : {}", node.endpoint_id());
@@ -140,60 +159,91 @@ async fn main() -> anyhow::Result<()> {
         println!("magic dns   : {dns}");
     }
 
-    // 1. Pineamos el archivo en el store local (solo el host lo tiene).
-    let tag = node.blobs_store.blobs().add_path(&file).await?;
-    println!("blob hash   : {}", tag.hash);
-    println!("tamaño      : {size} bytes");
+    // Biblioteca compartida CLI↔web: si se dio archivo inicial se importa
+    // al store + índice (+ doc/ticket P2P); si no, se arranca vacío y todo
+    // se añade después desde la pestaña Añadir (host) de la web.
+    let library = Library::new(
+        node.blobs_store.clone(),
+        node.db.clone(),
+        node.endpoint_id(),
+    )
+    .with_media_roots(media_roots.clone());
+    // Hash del archivo inicial, si lo hubo (para las URLs de ejemplo).
+    let mut hash_s = String::new();
+    // Ticket P2P del doc inicial, si lo hubo.
+    let mut ticket_s = String::new();
+    if let Some(f) = file.as_ref() {
+        let added = library.add_file(&f.to_string_lossy(), None).await?;
+        let tag_hash = Hash::from_str(&added.hash)?;
+        let size = added.size;
+        let name = added.path.clone();
+        println!("blob hash   : {}", added.hash);
+        println!("tamaño      : {size} bytes");
 
-    // 2. Biblioteca nueva (doc) + entrada que referencia el blob.
-    let author = node.docs.author_default().await?;
-    let doc = node.docs.create().await?;
-    doc.set_hash(author, name.as_bytes().to_vec(), tag.hash, size)
-        .await?;
-    let ticket = doc
-        .share(ShareMode::Write, AddrInfoOptions::RelayAndAddresses)
-        .await?;
-    println!("doc ticket  : {ticket}");
+        // 2. Biblioteca nueva (doc) + entrada que referencia el blob.
+        let author = node.docs.author_default().await?;
+        let doc = node.docs.create().await?;
+        doc.set_hash(author, name.as_bytes().to_vec(), tag_hash, size)
+            .await?;
+        let ticket = doc
+            .share(ShareMode::Write, AddrInfoOptions::RelayAndAddresses)
+            .await?;
+        println!("doc ticket  : {ticket}");
+        ticket_s = ticket.to_string();
 
-    // 3. Proyección local + metadato JSON (lo que el móvil verá).
-    let shared = SharedFile {
-        path: name.clone(),
-        hash: tag.hash.to_string(),
-        size,
-        mime: guess_mime(&name),
-        policy,
-        host_id: node.endpoint_id(),
-    };
-    node.db.upsert_file(&FileRow {
-        path: shared.path.clone(),
-        hash: shared.hash.clone(),
-        size,
-        mime: shared.mime.clone(),
-        policy,
-        host_id: shared.host_id.clone(),
-    })?;
-    println!(
-        "política    : {} (allows_download={})",
-        policy.as_str(),
-        policy.allows_download()
-    );
+        // 3. Proyección local + metadato JSON (lo que el móvil verá).
+        // `add_file` ya insertó la fila como StreamOnly; si se pidió otra
+        // política se actualiza conservando el tag (protección anti-GC).
+        let tag_s = node
+            .db
+            .get_by_hash(&added.hash)?
+            .map(|r| r.tag)
+            .unwrap_or_default();
+        let shared = SharedFile {
+            path: name.clone(),
+            hash: added.hash.clone(),
+            size,
+            mime: guess_mime(&name),
+            policy,
+            host_id: node.endpoint_id(),
+        };
+        node.db.upsert_file(&FileRow {
+            path: shared.path.clone(),
+            hash: shared.hash.clone(),
+            size,
+            mime: shared.mime.clone(),
+            policy,
+            host_id: shared.host_id.clone(),
+            tag: tag_s,
+        })?;
+        println!(
+            "política    : {} (allows_download={})",
+            policy.as_str(),
+            policy.allows_download()
+        );
+        hash_s = shared.hash.clone();
+    } else {
+        println!("biblioteca  : vacía — añade vídeos desde la pestaña Añadir (host) de la web");
+    }
 
-    // 4. Servidor web + UI + API. El tag se mantiene vivo anti-GC.
-    let _tag_guard = tag;
+    // 4. Servidor web + UI + API. El tag persistente queda registrado en la
+    // DB (columna `tag`); al quitar desde la web se des-pinea para liberar.
     let endpoint_id = node.endpoint_id();
-    let hash_s = shared.hash.clone();
     if http_local {
         // Fallback: HTTP loopback efímero (sin TLS, solo este PC).
-        let (base, _handle) = Gateway::serve_loopback(
+        let (base, _handle) = Gateway::serve_loopback_with_roots(
             node.blobs_store.clone(),
             node.db.clone(),
             endpoint_id.clone(),
+            media_roots.clone(),
         )
         .await?;
         println!("\n== UI WEB LOCAL (sin TLS) ==");
         println!("  {base}/   (lista + reproductor)");
         println!("  curl -s {base}/api/files");
-        println!("  mpv {base}/stream/{hash_s}");
+        if !hash_s.is_empty() {
+            println!("  mpv {base}/stream/{hash_s}");
+        }
     } else {
         // Modo Dev: HTTPS fijo en https://<domain>:<port> bindeado a la IP tailnet.
         let domain = domain
@@ -211,13 +261,14 @@ async fn main() -> anyhow::Result<()> {
         };
         let (cert, key) = ensure_tailnet_cert(&data_dir, &domain)?;
         let addr = std::net::SocketAddr::new(bind_ip, port);
-        let (_handle, bound) = Gateway::serve_tls(
+        let (_handle, bound) = Gateway::serve_tls_with_roots(
             node.blobs_store.clone(),
             node.db.clone(),
             endpoint_id.clone(),
             addr,
             &cert,
             &key,
+            media_roots.clone(),
         )
         .await?;
         let _ = bound;
@@ -229,8 +280,12 @@ async fn main() -> anyhow::Result<()> {
         println!("  Celular : abre {url}/ en Chrome Android (misma tailnet) → ▶ Reproducir + seek");
         println!("  Local   : también responde en https://{bind_ip}:{port}/ (cert del dominio)");
     }
-    println!("\n== TICKET P2P (para el futuro visor nativo / 2º nodo) ==");
-    println!("  {ticket}");
+    if !ticket_s.is_empty() {
+        println!("\n== TICKET P2P (para el futuro visor nativo / 2º nodo) ==");
+        println!("  {ticket_s}");
+    } else {
+        println!("\n(sin ticket P2P: arranca con un ARCHIVO inicial para generar uno)");
+    }
 
     tokio::signal::ctrl_c().await?;
     println!("\ncerrando…");

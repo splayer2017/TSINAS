@@ -7,25 +7,39 @@
 <title>p2p-nube · Baúl</title>
 <link rel="manifest" href="/manifest.json">
 <style>
-:root{color-scheme:dark}
+:root{color-scheme:dark;--bg:#111318;--card:#1a1f2b;--line:#262b36;--txt:#e8eaf0;--mut:#9aa3b2;--acc:#2f6fed;--ok:#2e7d4f;--bad:#7a2f3a}
 *{box-sizing:border-box}
-body{margin:0;background:#111318;color:#e8eaf0;font-family:system-ui,Roboto,sans-serif}
-header{padding:14px 16px;border-bottom:1px solid #262b36;position:sticky;top:0;background:#111318}
+body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,Roboto,sans-serif}
+header{padding:14px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg)}
 h1{font-size:18px;margin:0}
-.sub{font-size:12px;color:#9aa3b2;margin-top:4px;word-break:break-all}
+.sub{font-size:12px;color:var(--mut);margin-top:4px;word-break:break-all}
 main{padding:12px 16px 40px;max-width:720px;margin:0 auto}
-.row{display:flex;gap:8px;align-items:center;margin:12px 0}
-button{background:#2f6fed;border:0;color:#fff;border-radius:10px;padding:12px 16px;font-size:15px}
+nav.tabs{display:flex;gap:8px;margin:12px 0}
+nav.tabs button{flex:1}
+nav.tabs button[aria-selected="true"]{outline:2px solid #6f9bff}
+.row{display:flex;gap:8px;align-items:center;margin:12px 0;flex-wrap:wrap}
+button{background:var(--acc);border:0;color:#fff;border-radius:10px;padding:12px 16px;font-size:15px;cursor:pointer}
 button.ghost{background:#1d2230}
+button.danger{background:#3a1d22;border:1px solid var(--bad)}
+button:disabled{opacity:.5;cursor:wait}
+input[type=text]{flex:1;min-width:200px;background:#0d1017;color:var(--txt);border:1px solid var(--line);border-radius:10px;padding:12px;font-size:14px}
+label.check{display:flex;gap:8px;align-items:center;font-size:14px;color:var(--mut)}
 #player{display:none;margin:12px 0}
 video{width:100%;border-radius:12px;background:#000;max-height:46vh}
 ul{list-style:none;margin:12px 0 0;padding:0}
-li{background:#1a1f2b;border:1px solid #262b36;border-radius:12px;padding:12px;margin-bottom:10px}
+li{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}
 li .t{font-weight:600;font-size:15px;word-break:break-all}
-li .m{font-size:12px;color:#9aa3b2;margin:4px 0 8px}
+li .m{font-size:12px;color:var(--mut);margin:4px 0 8px}
 .badge{display:inline-block;font-size:11px;padding:2px 8px;border-radius:20px;background:#333c52;margin-left:6px}
-.err{background:#3a1d22;border:1px solid #7a2f3a;border-radius:10px;padding:10px;display:none;margin:8px 0;font-size:14px}
-.hint{font-size:12px;color:#9aa3b2}
+.err{background:#3a1d22;border:1px solid var(--bad);border-radius:10px;padding:10px;display:none;margin:8px 0;font-size:14px}
+.ok{background:#12291c;border:1px solid var(--ok);border-radius:10px;padding:10px;display:none;margin:8px 0;font-size:14px}
+.hint{font-size:12px;color:var(--mut)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:12px}
+.card h2{font-size:15px;margin:0 0 8px}
+progress{width:100%;height:10px}
+#joblog{font-size:12px;color:var(--mut);white-space:pre-wrap;word-break:break-all;max-height:160px;overflow:auto}
+.view{display:none}
+.view.active{display:block}
 </style>
 </head>
 <body>
@@ -34,6 +48,13 @@ li .m{font-size:12px;color:#9aa3b2;margin:4px 0 8px}
 <div class="sub" id="info">conectando…</div>
 </header>
 <main>
+<nav class="tabs" role="tablist">
+<button id="tab-list" aria-selected="true" onclick="show('list')">Biblioteca</button>
+<button id="tab-add" aria-selected="false" class="ghost" onclick="show('add')">Añadir</button>
+</nav>
+
+<!-- ============ VISTA: BIBLIOTECA ============ -->
+<section id="view-list" class="view active">
 <div class="row">
 <button id="reload">Recargar lista</button>
 <button id="home" class="ghost">Ocultar player</button>
@@ -45,18 +66,70 @@ li .m{font-size:12px;color:#9aa3b2;margin:4px 0 8px}
 </section>
 <ul id="list"></ul>
 <p class="hint">Catálogo + lanzador: MP4 se reproduce aquí mismo; MKV (HEVC + FLAC) se abre en VLC fuera de Chrome, sin convertir (<span id="ns">Cache-Control: no-store</span>).</p>
+</section>
+
+<!-- ============ VISTA: AÑADIR ============ -->
+<section id="view-add" class="view">
+<div class="err" id="adderr"></div>
+<div class="ok" id="addok"></div>
+<div class="card">
+<h2>Subir desde este dispositivo</h2>
+<div class="row">
+<input type="file" id="fileinput" accept="video/*,.mkv,.mp4,.webm,.avi" multiple>
+<button id="btn-upload" onclick="uploadFiles()">Subir</button>
+</div>
+<div id="upbox" style="display:none">
+<div class="row"><progress id="upbar" max="100" value="0"></progress><span class="hint" id="uptxt"></span></div>
+</div>
+<p class="hint">Funciona desde el PC y desde el móvil: el archivo se envía al servidor y queda en la lista (tope 8 GiB por archivo).</p>
+</div>
+<div class="card">
+<h2>Añadir archivo por ruta del servidor</h2>
+<div class="row">
+<input type="text" id="filepath" placeholder="/home/uriel/Videos/cap07.mkv" autocomplete="off" spellcheck="false">
+<button id="btn-add" onclick="addFile()">Añadir</button>
+</div>
+<p class="hint">La ruta es del PC que hospeda, no de este navegador.</p>
+</div>
+<div class="card">
+<h2>Escanear carpeta (lista los MKV solos)</h2>
+<div class="row">
+<input type="text" id="folderpath" placeholder="/home/uriel/Anime/Temporada1" autocomplete="off" spellcheck="false">
+<label class="check"><input type="checkbox" id="recursive"> subcarpetas</label>
+<button id="btn-scan" onclick="scanFolder()">Escanear</button>
+</div>
+<div id="jobbox" style="display:none">
+<div class="row"><progress id="jobbar" max="100" value="0"></progress><span class="hint" id="jobtxt"></span></div>
+<div id="joblog"></div>
+</div>
+</div>
+</section>
 </main>
 <script>
 const $=s=>document.querySelector(s);
+function show(which){
+  for(const v of ['list','add']){
+    $('#view-'+v).classList.toggle('active', v===which);
+    $('#tab-'+v).setAttribute('aria-selected', v===which?'true':'false');
+  }
+}
 function err(m){const e=$('#err');e.style.display='block';e.textContent=m;}
 function clear(){const e=$('#err');e.style.display='none';}
+function aerr(m){const e=$('#adderr');e.style.display='block';e.textContent=m;}
+function aclear(){const e=$('#adderr');e.style.display='none';$('#addok').style.display='none';}
+function aok(m){const e=$('#addok');e.style.display='block';e.textContent=m;}
 function fmt(n){if(n>1e9)return (n/1e9).toFixed(1)+' GB';if(n>1e6)return (n/1e6).toFixed(1)+' MB';if(n>1e3)return (n/1e3).toFixed(0)+' KB';return n+' B';}
 function isMkv(f){return (f.path||'').toLowerCase().endsWith('.mkv')||(f.mime||'').includes('matroska');}
 function streamUrl(f){return location.origin+'/stream/'+f.hash;}
 function vlcIntent(f){const scheme=location.protocol.replace(':','');const title=encodeURIComponent(f.path||'video');const fb=encodeURIComponent(streamUrl(f));return 'intent://'+location.host+'/stream/'+f.hash+'#Intent;action=android.intent.action.VIEW;scheme='+scheme+';package=org.videolan.vlc;type=video/*;S.title='+title+';S.browser_fallback_url='+fb+';end';}
 async function copyUrl(f,btn){const u=streamUrl(f);try{await navigator.clipboard.writeText(u);btn.textContent='✓ Copiada';setTimeout(()=>btn.textContent='Copiar URL',1500);}catch(e){prompt('Copia la URL para VLC:',u);}}
 async function info(){try{const r=await fetch('/api/info');const j=await r.json();$('#info').textContent='nodo '+j.endpoint_id.slice(0,12)+'… · '+j.files+' archivo(s)';}catch(e){$('#info').textContent='sin conexión con el host';}}
-async function files(){clear();try{const r=await fetch('/api/files');if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();const ul=$('#list');ul.innerHTML='';if(!j.length){ul.innerHTML='<li><div class="t">Vacío</div><div class="m">El host aún no marcó archivos para transmitir.</div></li>';return;}for(const f of j){const li=document.createElement('li');li.innerHTML='<div class="t"></div><div class="m"></div><div class="row"></div>';li.querySelector('.t').textContent=f.path;const sp=document.createElement('span');sp.className='badge';sp.textContent=f.policy;li.querySelector('.t').appendChild(sp);const web=document.createElement('span');web.className='badge';const mkv=isMkv(f);web.textContent=mkv?'Web: no · VLC: sí':'Web: sí';li.querySelector('.t').appendChild(web);li.querySelector('.m').textContent=fmt(f.size)+' · '+f.mime;const row=li.querySelector('.row');if(mkv){const note=document.createElement('div');note.className='hint';note.textContent='MKV HEVC + FLAC: Chrome no lo decodifica. Ábrelo en VLC.';li.appendChild(note);const a=document.createElement('a');a.href=vlcIntent(f);const b=document.createElement('button');b.textContent='Abrir en VLC';a.appendChild(b);row.appendChild(a);const c=document.createElement('button');c.className='ghost';c.textContent='Copiar URL';c.onclick=()=>copyUrl(f,c);row.appendChild(c);}else{const b=document.createElement('button');b.textContent='▶ Reproducir';b.onclick=()=>play(f);row.appendChild(b);const a=document.createElement('a');a.href=vlcIntent(f);a.style.marginLeft='8px';const v=document.createElement('button');v.className='ghost';v.textContent='VLC';a.appendChild(v);row.appendChild(a);}ul.appendChild(li);}}catch(e){err('No se pudo cargar la lista: '+e.message+' (¿host caído?)');}}
+async function files(){clear();try{const r=await fetch('/api/files');if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();j.sort((a,b)=>(a.path||'').localeCompare(b.path||'',undefined,{numeric:true}));const ul=$('#list');ul.innerHTML='';if(!j.length){ul.innerHTML='<li><div class="t">Vacío</div><div class="m">El host aún no marcó archivos para transmitir.</div></li>';return;}for(const f of j){const li=document.createElement('li');li.innerHTML='<div class="t"></div><div class="m"></div><div class="row"></div>';li.querySelector('.t').textContent=f.path;const sp=document.createElement('span');sp.className='badge';sp.textContent=f.policy;li.querySelector('.t').appendChild(sp);const web=document.createElement('span');web.className='badge';const mkv=isMkv(f);web.textContent=mkv?'Web: no · VLC: sí':'Web: sí';li.querySelector('.t').appendChild(web);li.querySelector('.m').textContent=fmt(f.size)+' · '+f.mime;const row=li.querySelector('.row');if(mkv){const note=document.createElement('div');note.className='hint';note.textContent='MKV HEVC + FLAC: Chrome no lo decodifica. Ábrelo en VLC.';li.appendChild(note);const a=document.createElement('a');a.href=vlcIntent(f);const b=document.createElement('button');b.textContent='Abrir en VLC';a.appendChild(b);row.appendChild(a);const c=document.createElement('button');c.className='ghost';c.textContent='Copiar URL';c.onclick=()=>copyUrl(f,c);row.appendChild(c);}else{const b=document.createElement('button');b.textContent='▶ Reproducir';b.onclick=()=>play(f);row.appendChild(b);const a=document.createElement('a');a.href=vlcIntent(f);a.style.marginLeft='8px';const v=document.createElement('button');v.className='ghost';v.textContent='VLC';a.appendChild(v);row.appendChild(a);}const q=document.createElement('button');q.className='danger';q.textContent='Quitar';q.title='Quita de la lista y libera espacio en el servidor';q.onclick=()=>removeFile(f,q);row.appendChild(q);ul.appendChild(li);}}catch(e){err('No se pudo cargar la lista: '+e.message+' (¿host caído?)');}}
+async function removeFile(f,btn){if(!confirm('¿Quitar "'+f.path+'" de la lista? Dejará de servirse y su espacio en el host se libera en ~1 min (GC). No borra tu archivo original.'))return;btn.disabled=true;try{const r=await fetch('/api/files/'+f.hash,{method:'DELETE'});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));files();info();}catch(e){err('No se pudo quitar: '+e.message);}finally{btn.disabled=false;}}
+async function uploadFiles(){aclear();const inp=$('#fileinput');if(!inp.files.length){aerr('Elige al menos un archivo con el selector.');return;}$('#btn-upload').disabled=true;$('#upbox').style.display='block';let ok=0;const errs=[];for(let i=0;i<inp.files.length;i++){const f=inp.files[i];$('#uptxt').textContent=(i+1)+'/'+inp.files.length+' · '+f.name;$('#upbar').value=Math.round(i/inp.files.length*100);const fd=new FormData();fd.append('file',f,f.name);try{const r=await fetch('/api/library/upload',{method:'POST',body:fd});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));ok++;}catch(e){errs.push(f.name+': '+e.message);}}$('#upbar').value=100;$('#uptxt').textContent=inp.files.length+'/'+inp.files.length;inp.value='';if(errs.length)aerr('Subidos '+ok+' de '+inp.files.length+'. Errores: '+errs.join(' | '));else aok('✓ Subido(s): '+ok+' archivo(s) en la lista.');files();info();$('#btn-upload').disabled=false;}
+async function addFile(){aclear();const p=$('#filepath').value.trim();if(!p){aerr('Escribe la ruta del archivo en el servidor.');return;}$('#btn-add').disabled=true;try{const r=await fetch('/api/library/add-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));aok('✓ Añadido: '+j.path+' ('+fmt(j.size)+')');$('#filepath').value='';files();info();}catch(e){aerr('No se pudo añadir: '+e.message);}finally{$('#btn-add').disabled=false;}}
+async function scanFolder(){aclear();const p=$('#folderpath').value.trim();if(!p){aerr('Escribe la ruta de la carpeta en el servidor.');return;}$('#btn-scan').disabled=true;$('#jobbox').style.display='none';try{const r=await fetch('/api/library/scan-folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p,recursive:$('#recursive').checked})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));if(j.found===0){aok('Carpeta vacía: no hay vídeos.');return;}$('#jobbox').style.display='block';pollJob(j.job_id);}catch(e){aerr('No se pudo escanear: '+e.message);$('#btn-scan').disabled=false;}}
+async function pollJob(id){try{const r=await fetch('/api/library/jobs/'+id);const j=await r.json();const pct=j.total?Math.round(j.done/j.total*100):100;$('#jobbar').value=pct;$('#jobtxt').textContent=j.done+'/'+j.total+' · '+j.status;$('#joblog').textContent=(j.errors||[]).join('\n');if(j.status==='running'){setTimeout(()=>pollJob(id),1000);return;}const ok=(j.added||[]).length;aok('Escaneo '+j.status+': '+ok+' añadido(s)'+(j.errors.length?' · '+j.errors.length+' con error (ver detalle)':''));files();info();}catch(e){aerr('Sin estado del escaneo: '+e.message);}finally{if($('#jobtxt').textContent.indexOf('running')<0)$('#btn-scan').disabled=false;}}
 function play(f){clear();const v=$('#v');$('#player').style.display='block';$('#now').textContent=f.path+' · '+f.policy;v.src='/stream/'+f.hash;v.play().catch(()=>{});$('#player').scrollIntoView();}
 $('#v').addEventListener('error',()=>{const v=$('#v');err('Error de reproducción (código '+(v.error?v.error.code:'?')+'). Si es 404 el host está offline; si es 416 pide otro rango.');});
 $('#reload').onclick=()=>{info();files();};
