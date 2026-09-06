@@ -1,7 +1,43 @@
-/data-nodo/
 /target
-Cargo.lock
+
+# Runtime data
+/data-nodo/
 *.sqlite3*
+*.sqlite
+
+# TLS certs
+*.pem
+*.key
+*.crt
+
+# Blob storage (any depth)
 blobs/
+
+# Docs (generated)
 docs/
+
+# Media
 *.mkv
+*.mp4
+*.webm
+*.avi
+*.mov
+
+# Logs
+*.log
+
+# Environment / secrets
+.env
+.env.*
+
+# IDEs
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
