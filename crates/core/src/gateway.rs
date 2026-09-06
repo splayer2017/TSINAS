@@ -301,7 +301,9 @@ struct ReorderReq {
 struct RenameFileReq {
     path: String,
     #[serde(default)]
-    title: String,
+    title: Option<String>,
+    #[serde(default)]
+    watched: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -491,24 +493,65 @@ async fn api_scan_folder(
         .into_response()
 }
 
-/// PATCH /api/files {path, title} — renombra solo el título visible.
+/// PATCH /api/files {path, title?, watched?} — renombra el título visible
+/// y/o marca como visto. Sin cambios = 400.
 async fn api_rename_file(
     State(state): State<Arc<Gateway>>,
     Json(req): Json<RenameFileReq>,
 ) -> impl IntoResponse {
-    match state.db.set_title(&req.path, &req.title) {
-        Ok(true) => (StatusCode::OK, Json(json!({"renamed": true}))).into_response(),
-        Ok(false) => (
+    if req.title.is_none() && req.watched.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "nada que actualizar"})),
+        )
+            .into_response();
+    }
+    if state.db.get_by_path(&req.path).ok().flatten().is_none() {
+        return (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "archivo no listado"})),
         )
-            .into_response(),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": e.to_string()})),
-        )
-            .into_response(),
+            .into_response();
     }
+    if let Some(t) = req.title.as_deref() {
+        match state.db.set_title(&req.path, t) {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "archivo no listado"})),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response();
+            }
+        }
+    }
+    if let Some(w) = req.watched {
+        match state.db.set_watched(&req.path, w) {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "archivo no listado"})),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response();
+            }
+        }
+    }
+    (StatusCode::OK, Json(json!({"renamed": true}))).into_response()
 }
 
 /// GET /api/collections — lista plana con nº de items propios + hijas.
@@ -1354,6 +1397,7 @@ mod tests {
             host_id: "test".into(),
             tag: String::new(),
             title: String::new(),
+            watched: false,
         })?;
 
         let (base, _h) = Gateway::serve_loopback(store, db, "test-endpoint".into()).await?;
@@ -1398,6 +1442,7 @@ mod tests {
             host_id: "test".into(),
             tag: String::new(),
             title: String::new(),
+            watched: false,
         })?;
 
         let (base, _h) = Gateway::serve_loopback(store, db, "test-endpoint".into()).await?;
@@ -1442,6 +1487,7 @@ mod tests {
             host_id: "h1".into(),
             tag: String::new(),
             title: String::new(),
+            watched: false,
         })?;
 
         let (base, _h) = Gateway::serve_loopback(store, db, "abc123".into()).await?;
@@ -1820,6 +1866,7 @@ mod tests {
                 host_id: "h".into(),
                 tag: format!("t{h}"),
                 title: String::new(),
+                watched: false,
             })?;
         }
         let (base, _h) = Gateway::serve_loopback(store, db, "reorder-test".into()).await?;

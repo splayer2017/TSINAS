@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#101214">
-<title>p2p-nube · Baúl</title>
+<title>TSINAS · Baúl</title>
 <link rel="manifest" href="/manifest.json">
 <style>
 :root{
@@ -63,6 +63,31 @@ select{max-width:100%}
 .item .actions{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
 .item .tools{display:flex;gap:7px;flex-wrap:wrap;margin-top:8px;align-items:center}
 .item .tools input,.item .tools select{padding:8px 10px;font-size:13px}
+/* Episodios: formato convencional — portada ancha + Ver/VLC/⋮ + switch visto */
+.ep{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:12px;display:flex;gap:14px}
+.ep.seen{border-color:var(--line);opacity:.92}
+.ep-poster{width:112px;flex:none;align-self:stretch;min-height:150px;background:var(--bg2);border:1px solid var(--line);display:grid;place-items:center;color:var(--dim);font-size:11px;font-weight:700;overflow:hidden}
+@media(max-width:480px){.ep-poster{width:84px;min-height:120px}}
+.ep-poster img{width:100%;height:100%;object-fit:cover}
+.ep-main{flex:1;min-width:0;display:flex;flex-direction:column}
+.ep-top{display:flex;gap:10px;align-items:flex-start}
+.ep-top .t{flex:1;min-width:0;font-weight:650;font-size:14.5px;word-break:break-word;line-height:1.35}
+.ep .m{font-size:12px;color:var(--mut);margin:5px 0 9px}
+.ep-actions{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+.ep-actions .iconbtn{min-width:44px}
+.menu-wrap{position:relative;display:inline-block}
+.menu{position:absolute;right:0;top:calc(100% + 6px);z-index:30;min-width:230px;background:var(--bg2);border:1px solid var(--line2);padding:6px;display:none}
+.menu.open{display:block}
+.menu button{display:flex;width:100%;text-align:left;background:transparent;border:0;color:var(--txt);padding:11px 10px;font-size:13.5px;font-weight:600;cursor:pointer}
+.menu button:hover{background:var(--card2)}
+.menu .sep{border-top:1px solid var(--line);margin:6px 0}
+.menu select,.menu input{width:100%;margin:2px 0 6px}
+.badge.seen{color:var(--ok);border-color:var(--ok)}
+.switch{display:inline-flex;gap:8px;align-items:center;font-size:12px;color:var(--mut);cursor:pointer;flex:none;user-select:none}
+.switch input{appearance:none;width:38px;height:22px;background:var(--bg);border:1px solid var(--line2);border-radius:999px;position:relative;cursor:pointer;margin:0;flex:none}
+.switch input:checked{background:var(--ok);border-color:var(--ok)}
+.switch input::after{content:'';position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--txt);transition:left .15s}
+.switch input:checked::after{left:18px;background:#101214}
 .chip{font-size:11px;color:var(--dim)}
 li.file-li{list-style:none}
 /* Colecciones */
@@ -122,8 +147,8 @@ label.check{display:flex;gap:8px;align-items:center;font-size:13px;color:var(--m
 <body>
 <header class="top"><div class="wrap">
   <div class="bar">
-    <div class="mark">NUBE</div>
-    <h1>p2p-nube · Baúl<small id="info">conectando…</small></h1>
+    <div class="mark">TSINAS</div>
+    <h1>TSINAS<small id="info">conectando…</small></h1>
     <input id="search" type="text" placeholder="Buscar…" oninput="render()">
   </div>
   <nav class="tabs" role="tablist">
@@ -367,14 +392,60 @@ async function fetchDetail(id){
   const r=await fetch('/api/collections/'+id);if(!r.ok)throw new Error('HTTP '+r.status);
   const raw=await r.json();DETAILCACHE[id]=raw;return normDetail(raw);
 }
+function watchedSwitch(path,checked){
+  const lab=document.createElement('label');lab.className='switch';lab.title='Marcar como visto';
+  const inp=document.createElement('input');inp.type='checkbox';inp.checked=!!checked;
+  inp.setAttribute('aria-label','Marcar como visto');
+  const tx=document.createElement('span');tx.textContent='Visto';
+  lab.appendChild(inp);lab.appendChild(tx);
+  inp.onchange=()=>toggleWatched(path,inp.checked,inp,lab.closest('.ep'));
+  return lab;
+}
+async function toggleWatched(path,watched,input,card){
+  input.disabled=true;
+  try{
+    const r=await fetch('/api/files',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({path,watched})});
+    const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));
+    const f=FILES.find(x=>x.path===path);if(f)f.watched=watched;
+    DETAILCACHE={};
+    if(card){card.classList.toggle('seen',watched);const b=card.querySelector('.badge.seen');if(b)b.remove();
+      if(watched){const s=document.createElement('span');s.className='badge seen';s.textContent='VISTO';card.querySelector('.ep-top .t, .t').appendChild(s);}}
+    toast(watched?'Marcado como visto':'Marcado como no visto');
+  }catch(e){toast('No se pudo guardar visto: '+e.message);input.checked=!watched;}finally{input.disabled=false;}
+}
+function closeMenus(except){document.querySelectorAll('.menu.open').forEach(m=>{if(m!==except)m.classList.remove('open');});document.querySelectorAll('.menu-wrap > button[aria-expanded="true"]').forEach(b=>{const w=b.closest('.menu-wrap');if(!w||!w.contains(except))b.setAttribute('aria-expanded','false');});}
 function epCard(it,cid,posterUrl){
-  const f={path:it.file_path,hash:it.hash,size:it.size,mime:it.mime,title:it.title};
-  const card=fileCard(f,cid,posterUrl);
-  const tools=card.querySelector('.tools');if(tools)tools.remove();
-  const acts=card.querySelector('.actions');
-  const out=document.createElement('button');out.className='dim small';out.textContent='Sacar';out.onclick=()=>unlink(cid,it.file_path);
-  acts.appendChild(out);
-  if(it.label){const lb=document.createElement('span');lb.className='badge';lb.textContent=it.label;card.querySelector('.t').appendChild(lb);}
+  const f={path:it.file_path,hash:it.hash,size:it.size,mime:it.mime,title:it.title,watched:!!it.watched};
+  const mkv=isMkv(f);
+  const card=document.createElement('div');card.className='ep'+(f.watched?' seen':'');
+  const th=document.createElement('div');th.className='ep-poster';
+  if(posterUrl){const im=document.createElement('img');im.loading='lazy';im.src=posterUrl;im.alt='';th.appendChild(im);}
+  else th.textContent=mkv?'MKV':'MP4';
+  card.appendChild(th);
+  const main=document.createElement('div');main.className='ep-main';card.appendChild(main);
+  const top=document.createElement('div');top.className='ep-top';main.appendChild(top);
+  const t=document.createElement('div');t.className='t';t.textContent=disp(f);t.appendChild(badgeFor(f));top.appendChild(t);
+  if(it.label){const lb=document.createElement('span');lb.className='badge';lb.textContent=it.label;t.appendChild(lb);}
+  if(f.watched){const s=document.createElement('span');s.className='badge seen';s.textContent='VISTO';t.appendChild(s);}
+  top.appendChild(watchedSwitch(f.path,f.watched));
+  const m=document.createElement('div');m.className='m';m.textContent=(f.path||'')+' · '+fmt(f.size)+' · '+f.mime;main.appendChild(m);
+  const a=document.createElement('div');a.className='ep-actions';main.appendChild(a);
+  const pv=document.createElement('button');pv.className=mkv?'dim small':'small';pv.textContent=mkv?'Probar en web':'▶ Ver';pv.onclick=()=>play(f);a.appendChild(pv);
+  const va=document.createElement('a');va.href=vlcIntent(f);const vb=document.createElement('button');vb.className='ghost small';vb.textContent='VLC';va.appendChild(vb);a.appendChild(va);
+  const mw=document.createElement('span');mw.className='menu-wrap';a.appendChild(mw);
+  const dot=document.createElement('button');dot.className='dim small iconbtn';dot.textContent='⋯';dot.title='Más opciones';dot.setAttribute('aria-haspopup','menu');dot.setAttribute('aria-expanded','false');mw.appendChild(dot);
+  const menu=document.createElement('div');menu.className='menu';menu.setAttribute('role','menu');mw.appendChild(menu);
+  dot.onclick=(ev)=>{ev.stopPropagation();const willOpen=!menu.classList.contains('open');closeMenus();menu.classList.toggle('open',willOpen);dot.setAttribute('aria-expanded',willOpen?'true':'false');};
+  const cp=document.createElement('button');cp.textContent='Copiar URL';cp.onclick=()=>{copyUrl(f);closeMenus();};menu.appendChild(cp);
+  const sep1=document.createElement('div');sep1.className='sep';menu.appendChild(sep1);
+  const rn=document.createElement('input');rn.type='text';rn.value=(f.title||'');rn.placeholder='Renombrar título visible…';rn.setAttribute('aria-label','Renombrar título visible');menu.appendChild(rn);
+  const rb=document.createElement('button');rb.textContent='Guardar título';rb.onclick=()=>renameFile(f,rn.value,rb);menu.appendChild(rb);
+  const sep2=document.createElement('div');sep2.className='sep';menu.appendChild(sep2);
+  const sel=leafSelect(cid||'');menu.appendChild(sel);
+  const mb=document.createElement('button');mb.textContent='Mover a…';mb.onclick=()=>moveFile(f,sel.value,mb);menu.appendChild(mb);
+  const sep3=document.createElement('div');sep3.className='sep';menu.appendChild(sep3);
+  const out=document.createElement('button');out.textContent='Sacar de aquí';out.onclick=()=>{closeMenus();unlink(cid,it.file_path);};menu.appendChild(out);
+  if(mkv){const h=document.createElement('div');h.className='hint';h.textContent='MKV HEVC: Chrome no lo decodifica — usa VLC.';main.appendChild(h);}
   return card;
 }
 function orderButtons(onUp,onDown){
@@ -401,7 +472,7 @@ async function renderTree(){
           card.draggable=true;card.dataset.idx=idx;
           card.addEventListener('dragstart',(e)=>{e.dataTransfer.setData('text/plain',String(idx));card.classList.add('dragging');});
           card.addEventListener('dragend',()=>card.classList.remove('dragging'));
-          const acts=card.querySelector('.actions');
+          const acts=card.querySelector('.ep-actions, .actions');
           acts.appendChild(orderButtons(()=>{
             const nx=moveInList(sorted,idx,idx-1);reorderItems(d.collection.id,nx.map(x=>x.file_path));
           },()=>{
@@ -434,7 +505,7 @@ async function renderTree(){
           card.draggable=true;card.dataset.idx=idx;
           card.addEventListener('dragstart',(e)=>{e.dataTransfer.setData('text/plain',String(idx));card.classList.add('dragging');});
           card.addEventListener('dragend',()=>card.classList.remove('dragging'));
-          const acts=card.querySelector('.actions');
+          const acts=card.querySelector('.ep-actions, .actions');
           acts.appendChild(orderButtons(()=>{
             const nx=moveInList(sorted,idx,idx-1);reorderItems(k.collection.id,nx.map(x=>x.file_path));
           },()=>{
@@ -539,7 +610,7 @@ async function openCol(id,keep){
           card.draggable=true;card.dataset.idx=idx;
           card.addEventListener('dragstart',(e)=>{e.dataTransfer.setData('text/plain',String(idx));card.classList.add('dragging');});
           card.addEventListener('dragend',()=>card.classList.remove('dragging'));
-          const acts=card.querySelector('.actions');
+          const acts=card.querySelector('.ep-actions, .actions');
           acts.appendChild(orderButtons(()=>{
             const nx=moveInList(sorted,idx,idx-1);reorderItems(k.collection.id,nx.map(x=>x.file_path));
           },()=>{
@@ -564,7 +635,7 @@ async function openCol(id,keep){
           card.draggable=true;card.dataset.idx=idx;
           card.addEventListener('dragstart',(e)=>{e.dataTransfer.setData('text/plain',String(idx));card.classList.add('dragging');});
           card.addEventListener('dragend',()=>card.classList.remove('dragging'));
-          const acts=card.querySelector('.actions');
+          const acts=card.querySelector('.ep-actions, .actions');
           acts.appendChild(orderButtons(()=>{
             const nx=moveInList(sorted,idx,idx-1);reorderItems(d.collection.id,nx.map(x=>x.file_path));
           },()=>{
@@ -590,7 +661,8 @@ async function uploadFiles(){aclear();const inp=$('#fileinput');if(!inp.files.le
 /* ---- Player híbrido: web + VLC siempre ---- */
 function play(f){cur=f;clear();const v=$('#v');$('#overlay').classList.add('open');$('#mtitle').textContent=disp(f);$('#mvlc').href=vlcIntent(f);const mkv=isMkv(f);$('#mnote').textContent=mkv?'MKV: si la web no lo abre, usa VLC (botón siempre disponible).':'MP4/WebM: reproducción nativa.';v.src='/stream/'+f.hash;v.play().catch(()=>{});}
 function closePlayer(){const v=$('#v');v.pause();v.removeAttribute('src');v.load();$('#overlay').classList.remove('open');cur=null;}
-document.addEventListener('keydown',e=>{if(e.key==='Escape')closePlayer();});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeMenus();closePlayer();}});
+document.addEventListener('click',()=>closeMenus());
 $('#v').addEventListener('error',()=>{const v=$('#v');err('Error de reproducción (código '+(v.error?v.error.code:'?')+'). Prueba Abrir en VLC — la URL es la misma.');});
 $('#reload').onclick=()=>refresh();
 if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(()=>{});}

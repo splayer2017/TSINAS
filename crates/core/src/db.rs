@@ -10,6 +10,7 @@ use crate::policy::Policy;
 /// contenido del GC; se borra al quitar el archivo (des-pinear).
 /// `title` es el título visible editable desde la web (sin tocar disco);
 /// vacío = mostrar el nombre base del `path`.
+/// `watched` marca el episodio como visto (switch en la UI, compartido).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileRow {
     pub path: String,
@@ -21,6 +22,8 @@ pub struct FileRow {
     pub tag: String,
     #[serde(default)]
     pub title: String,
+    #[serde(default)]
+    pub watched: bool,
 }
 
 impl FileRow {
@@ -95,6 +98,8 @@ pub struct CollectionItemView {
     pub label: String,
     #[serde(default)]
     pub pos: i64,
+    #[serde(default)]
+    pub watched: bool,
 }
 
 /// Metadato compartido de un archivo para sincronización P2P.
@@ -135,7 +140,8 @@ fn ensure_schema(conn: &Connection) -> anyhow::Result<()> {
             policy TEXT NOT NULL DEFAULT 'stream_only',
             host_id TEXT NOT NULL DEFAULT '',
             tag TEXT NOT NULL DEFAULT '',
-            title TEXT NOT NULL DEFAULT ''
+            title TEXT NOT NULL DEFAULT '',
+            watched INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS settings(
             key TEXT PRIMARY KEY,
@@ -174,6 +180,10 @@ fn ensure_schema(conn: &Connection) -> anyhow::Result<()> {
         [],
     );
     let _ = conn.execute(
+        "ALTER TABLE files ADD COLUMN watched INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
         "ALTER TABLE collections ADD COLUMN poster_url TEXT NOT NULL DEFAULT ''",
         [],
     );
@@ -205,6 +215,7 @@ fn row_from(r: &rusqlite::Row) -> rusqlite::Result<FileRow> {
         host_id: r.get(5)?,
         tag: r.get(6)?,
         title: r.get(7).unwrap_or_default(),
+        watched: r.get::<_, Option<i64>>(8)?.unwrap_or(0) != 0,
     })
 }
 
@@ -244,8 +255,8 @@ impl Db {
     pub fn upsert_file(&self, row: &FileRow) -> anyhow::Result<()> {
         let conn = self.inner.lock().unwrap();
         conn.execute(
-            "INSERT INTO files(path,hash,size,mime,policy,host_id,tag,title)
-             VALUES(?,?,?,?,?,?,?,?)
+            "INSERT INTO files(path,hash,size,mime,policy,host_id,tag,title,watched)
+             VALUES(?,?,?,?,?,?,?,?,?)
              ON CONFLICT(path) DO UPDATE SET hash=excluded.hash,size=excluded.size,
                mime=excluded.mime,policy=excluded.policy,host_id=excluded.host_id,
                tag=excluded.tag",
@@ -257,7 +268,8 @@ impl Db {
                 row.policy.as_str(),
                 row.host_id,
                 row.tag,
-                row.title
+                row.title,
+                i64::from(row.watched),
             ],
         )?;
         Ok(())
@@ -272,10 +284,20 @@ impl Db {
         Ok(n > 0)
     }
 
+    /// Marca/desmarca un archivo como visto. Devuelve `true` si existía.
+    pub fn set_watched(&self, path: &str, watched: bool) -> anyhow::Result<bool> {
+        let conn = self.inner.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE files SET watched=? WHERE path=?",
+            params![i64::from(watched), path],
+        )?;
+        Ok(n > 0)
+    }
+
     pub fn list_files(&self) -> anyhow::Result<Vec<FileRow>> {
         let conn = self.inner.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT path,hash,size,mime,policy,host_id,tag,title FROM files ORDER BY path",
+            "SELECT path,hash,size,mime,policy,host_id,tag,title,watched FROM files ORDER BY path",
         )?;
         let rows = stmt
             .query_map([], row_from)?
@@ -286,7 +308,7 @@ impl Db {
     pub fn get_by_hash(&self, hash: &str) -> anyhow::Result<Option<FileRow>> {
         let conn = self.inner.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT path,hash,size,mime,policy,host_id,tag,title FROM files WHERE hash=?",
+            "SELECT path,hash,size,mime,policy,host_id,tag,title,watched FROM files WHERE hash=?",
         )?;
         let mut rows = stmt.query_map([hash], row_from)?;
         Ok(rows.next().transpose()?)
@@ -295,7 +317,7 @@ impl Db {
     pub fn get_by_path(&self, path: &str) -> anyhow::Result<Option<FileRow>> {
         let conn = self.inner.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT path,hash,size,mime,policy,host_id,tag,title FROM files WHERE path=?",
+            "SELECT path,hash,size,mime,policy,host_id,tag,title,watched FROM files WHERE path=?",
         )?;
         let mut rows = stmt.query_map([path], row_from)?;
         Ok(rows.next().transpose()?)
@@ -304,7 +326,7 @@ impl Db {
     pub fn get_rows_by_hash(&self, hash: &str) -> anyhow::Result<Vec<FileRow>> {
         let conn = self.inner.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT path,hash,size,mime,policy,host_id,tag,title FROM files WHERE hash=?",
+            "SELECT path,hash,size,mime,policy,host_id,tag,title,watched FROM files WHERE hash=?",
         )?;
         let rows = stmt
             .query_map([hash], row_from)?
@@ -710,7 +732,7 @@ impl Db {
     fn items_of(conn: &rusqlite::Connection, id: &str) -> anyhow::Result<Vec<CollectionItemView>> {
         let mut stmt = conn.prepare(
             "SELECT ci.file_path, ci.season, ci.label, ci.pos,
-                    f.hash, f.size, f.mime, COALESCE(f.title,'')
+                    f.hash, f.size, f.mime, COALESCE(f.title,''), COALESCE(f.watched,0)
              FROM collection_items ci JOIN files f ON f.path=ci.file_path
              WHERE ci.collection_id=? ORDER BY ci.pos, f.title, f.path",
         )?;
@@ -724,6 +746,7 @@ impl Db {
                 let size: i64 = r.get(5)?;
                 let mime: String = r.get(6)?;
                 let title_raw: String = r.get(7)?;
+                let watched: i64 = r.get(8)?;
                 let title = if title_raw.trim().is_empty() {
                     std::path::Path::new(&file_path)
                         .file_name()
@@ -741,6 +764,7 @@ impl Db {
                     season,
                     label,
                     pos,
+                    watched: watched != 0,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -813,6 +837,7 @@ mod tests {
             host_id: "host1".into(),
             tag: "t1".into(),
             title: String::new(),
+            watched: false,
         })?;
         let all = db.list_files()?;
         assert_eq!(all.len(), 1);
@@ -824,6 +849,23 @@ mod tests {
             db.get_by_path("anime/cap01.mkv")?.unwrap().display_title(),
             "Capítulo 1"
         );
+        // Visto: switch compartido, se conserva al re-hashear (upsert).
+        assert!(!db.get_by_path("anime/cap01.mkv")?.unwrap().watched);
+        assert!(db.set_watched("anime/cap01.mkv", true)?);
+        assert!(db.get_by_path("anime/cap01.mkv")?.unwrap().watched);
+        db.upsert_file(&FileRow {
+            path: "anime/cap01.mkv".into(),
+            hash: "abc2".into(),
+            size: 43,
+            mime: "video/x-matroska".into(),
+            policy: Policy::StreamOnly,
+            host_id: "host1".into(),
+            tag: "t2".into(),
+            title: String::new(),
+            watched: false,
+        })?;
+        assert!(db.get_by_path("anime/cap01.mkv")?.unwrap().watched);
+        assert!(db.set_watched("anime/cap01.mkv", false)?);
         // Colecciones: raíz + hija, mover entre hijas, borrado en cascada.
         let col = db.create_collection("series", "Naruto", "")?;
         assert_eq!(col.kind, "series");
@@ -846,7 +888,7 @@ mod tests {
         assert!(db.delete_collection(&col.id)?);
         assert!(db.get_collection(&t1.id)?.is_none());
         assert!(!db.delete_by_hash("no-existe")?);
-        assert!(db.delete_by_hash("abc")?);
+        assert!(db.delete_by_hash("abc2")?);
         assert!(db.list_files()?.is_empty());
         // Al borrar el archivo se limpian sus items.
         assert!(db.collection_detail(&col2.id)?.unwrap().items.is_empty());
@@ -874,6 +916,7 @@ mod tests {
                 host_id: "host1".into(),
                 tag: format!("t{h}"),
                 title: String::new(),
+                watched: false,
             })?;
         }
         let serie = db.create_collection("series", "Re:Zero", "")?;

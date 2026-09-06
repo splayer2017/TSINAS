@@ -1,6 +1,6 @@
-# p2p-nube — nube P2P privada (Tailscale + iroh)
+# TSINAS — nube P2P privada (Tailscale + iroh)
 
-MVP: **Baúl + streaming video**. PC Linux aloja, Android reproduce sin descargar.
+TSINAS es tu baúl personal: el PC Linux aloja y Android reproduce por streaming sin descargar.
 
 ## Stack
 
@@ -74,7 +74,7 @@ Requisitos en el celular: app **Tailscale** instalada, logueada en la **misma ta
     ./target/debug/p2p-serve --data-dir ./data-nodo
     ```
 2. En el celular (Chrome Android), abre `https://uriel-1.tail7345d6.ts.net:37491/`.
-3. Verás la lista del baúl: toca **▶ Reproducir**, prueba adelantar/retroceder (seek usa rangos).
+3. Verás TSINAS: toca **▶ Ver**, marca episodios como **Vistos** con el switch, prueba adelantar/retroceder (seek usa rangos).
 4. Opcional: ⋮ > **Agregar a pantalla principal** (PWA; el service worker solo cachea la
    shell, nunca los videos ni la API).
 

@@ -195,6 +195,7 @@ impl Library {
             host_id: self.endpoint_id.clone(),
             tag: tag_s,
             title: String::new(),
+            watched: false,
         })?;
 
         // BLOCK-01: Publicar entrada en iroh-docs si hay un doc activo
@@ -285,6 +286,7 @@ impl Library {
             host_id: self.endpoint_id.clone(),
             tag: tag_s,
             title: String::new(),
+            watched: false,
         })?;
 
         // BLOCK-01: Publicar entrada en iroh-docs si hay un doc activo

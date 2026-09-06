@@ -1,9 +1,9 @@
 {
-  "name": "p2p-nube · Baúl",
-  "short_name": "Baúl",
+  "name": "TSINAS",
+  "short_name": "TSINAS",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0b0d10",
   "theme_color": "#0b0d10",
-  "description": "Nube P2P privada: streaming sin descarga"
+  "description": "TSINAS: nube P2P privada, streaming sin descarga"
 }

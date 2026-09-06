@@ -1,7 +1,7 @@
-//! p2p-serve: expone un archivo como StreamOnly y lo sirve por gateway loopback.
+//! TSINAS: expone un archivo como StreamOnly y lo sirve por gateway loopback.
 //!
 //! Uso:
-//!   p2p-serve <ARCHIVO> [--data-dir ./data-nodo] [--policy stream_only|mirror|host_only]
+//!   TSINAS <ARCHIVO> [--data-dir ./data-nodo] [--policy stream_only|mirror|host_only]
 //!
 //! Flujo: Node::spawn -> add_path -> doc nuevo -> set_hash -> imprime ticket+hash+URL.
 //! El visor (otro nodo con el ticket) hace sync de metadatos y reproduce vía
@@ -14,12 +14,12 @@ use p2p_nube_core::{db::FileRow, gateway::Gateway, tailnet, Library, Node, Polic
 
 fn usage() -> ! {
     eprintln!(
-        "Uso: p2p-serve [ARCHIVO] [--data-dir DIR] [--policy stream_only|mirror|host_only]\n\
+        "Uso: TSINAS [ARCHIVO] [--data-dir DIR] [--policy stream_only|mirror|host_only]\n\
          [--port 37491] [--bind IP] [--domain DOM] [--http-local]\n\
          [--media-roots DIR1,DIR2]  (rutas permitidas para añadir desde la web; vacío = sin restricción)\n\
          Sin ARCHIVO arranca con la biblioteca vacía y los vídeos se añaden\n\
          desde la web (pestaña Añadir (host)).\n\
-         Ejemplo: p2p-serve ./video.mp4 --data-dir ./data-nodo --policy stream_only\n\
+         Ejemplo: TSINAS ./video.mp4 --data-dir ./data-nodo --policy stream_only\n\
          Por defecto sirve HTTPS en https://<domain>:<port> bindeado a tu IP tailnet (modo Dev)."
     );
     std::process::exit(2);
@@ -198,6 +198,7 @@ async fn main() -> anyhow::Result<()> {
                 host_id: node.endpoint_id(),
                 tag: tag_s,
                 title: String::new(),
+                watched: false,
             })?;
         }
         println!(
