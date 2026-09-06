@@ -1,7 +1,7 @@
 // SW mínimo: cachea solo la shell (/, manifest). Nunca /api/* ni /stream/*.
 // Bump de versión en cada cambio de UI para forzar actualización en clientes.
 const SHELL = ["/", "/manifest.json"];
-const CACHE = "baul-v3";
+const CACHE = "baul-v4";
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
 });

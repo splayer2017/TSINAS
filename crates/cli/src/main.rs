@@ -197,6 +197,7 @@ async fn main() -> anyhow::Result<()> {
                 policy,
                 host_id: node.endpoint_id(),
                 tag: tag_s,
+                title: String::new(),
             })?;
         }
         println!(

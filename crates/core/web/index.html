@@ -3,145 +3,571 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#111318">
+<meta name="theme-color" content="#101214">
 <title>p2p-nube · Baúl</title>
 <link rel="manifest" href="/manifest.json">
 <style>
-:root{color-scheme:dark;--bg:#111318;--card:#1a1f2b;--line:#262b36;--txt:#e8eaf0;--mut:#9aa3b2;--acc:#2f6fed;--ok:#2e7d4f;--bad:#7a2f3a}
+:root{
+  color-scheme:dark;
+  --bg:#101214; --bg2:#141719; --card:#16191d; --card2:#1a1e23;
+  --line:#262c32; --line2:#39414a;
+  --txt:#dde3e8; --mut:#9aa3ad; --dim:#6f787f;
+  --acc:#d5dbe1; --acc-ink:#14171a;
+  --ok:#7fc79b; --bad:#d98a90;
+  --r:2px;
+}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--txt);font-family:system-ui,Roboto,sans-serif}
-header{padding:14px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg)}
-h1{font-size:18px;margin:0}
-.sub{font-size:12px;color:var(--mut);margin-top:4px;word-break:break-all}
-main{padding:12px 16px 40px;max-width:720px;margin:0 auto}
-nav.tabs{display:flex;gap:8px;margin:12px 0}
-nav.tabs button{flex:1}
-nav.tabs button[aria-selected="true"]{outline:2px solid #6f9bff}
-.row{display:flex;gap:8px;align-items:center;margin:12px 0;flex-wrap:wrap}
-button{background:var(--acc);border:0;color:#fff;border-radius:10px;padding:12px 16px;font-size:15px;cursor:pointer}
-button.ghost{background:#1d2230}
-button.danger{background:#3a1d22;border:1px solid var(--bad)}
+body{margin:0;background:var(--bg);color:var(--txt);font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;min-height:100vh}
+header.top{position:sticky;top:0;z-index:20;background:var(--bg2);border-bottom:1px solid var(--line)}
+.wrap{max-width:1020px;margin:0 auto;padding:0 16px}
+.bar{display:flex;gap:12px;align-items:center;padding:14px 0 10px}
+.mark{width:34px;height:34px;background:var(--card2);border:1px solid var(--line2);display:grid;place-items:center;font-size:15px;color:var(--acc);flex:none}
+h1{font-size:17px;margin:0;letter-spacing:.2px;font-weight:650}
+h1 small{display:block;font-size:11px;color:var(--mut);font-weight:400;letter-spacing:.4px}
+#search{margin-left:auto;background:var(--bg);border:1px solid var(--line2);color:var(--txt);border-radius:var(--r);padding:10px 12px;font-size:14px;min-width:150px;max-width:260px;width:100%}
+#info{font-size:11px;color:var(--dim);padding:0 0 10px;word-break:break-all}
+nav.tabs{display:flex;gap:8px;padding:0 0 12px}
+nav.tabs button{flex:1;background:transparent;border:1px solid var(--line2);color:var(--mut);border-radius:var(--r);padding:11px;font-size:14px;font-weight:600;cursor:pointer;letter-spacing:.2px}
+nav.tabs button[aria-selected="true"]{background:var(--acc);color:var(--acc-ink);border-color:var(--acc)}
+main{padding:16px 16px 60px;max-width:1020px;margin:0 auto}
+.view{display:none}.view.active{display:block}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:4px 0 12px}
+button{background:var(--acc);border:1px solid var(--acc);color:var(--acc-ink);border-radius:var(--r);padding:11px 15px;font-size:14px;font-weight:650;cursor:pointer}
+button.ghost{background:transparent;color:var(--txt);border:1px solid var(--line2)}
+button.dim{background:transparent;color:var(--mut);border:1px solid var(--line)}
+button.danger{background:transparent;color:var(--bad);border:1px solid var(--bad)}
+button.small{padding:8px 11px;font-size:13px}
 button:disabled{opacity:.5;cursor:wait}
-input[type=text]{flex:1;min-width:200px;background:#0d1017;color:var(--txt);border:1px solid var(--line);border-radius:10px;padding:12px;font-size:14px}
-label.check{display:flex;gap:8px;align-items:center;font-size:14px;color:var(--mut)}
-#player{display:none;margin:12px 0}
-video{width:100%;border-radius:12px;background:#000;max-height:46vh}
-ul{list-style:none;margin:12px 0 0;padding:0}
-li{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px}
-li .t{font-weight:600;font-size:15px;word-break:break-all}
-li .m{font-size:12px;color:var(--mut);margin:4px 0 8px}
-.badge{display:inline-block;font-size:11px;padding:2px 8px;border-radius:20px;background:#333c52;margin-left:6px}
-.badge-zc{background:#123824;color:#4ade80;border:1px solid #2e7d4f}
-.badge-copy{background:#3a1d22;color:#f87171;border:1px solid var(--bad)}
-.err{background:#3a1d22;border:1px solid var(--bad);border-radius:10px;padding:10px;display:none;margin:8px 0;font-size:14px}
-.ok{background:#12291c;border:1px solid var(--ok);border-radius:10px;padding:10px;display:none;margin:8px 0;font-size:14px}
-.hint{font-size:12px;color:var(--mut)}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:12px}
-.card h2{font-size:15px;margin:0 0 8px}
-progress{width:100%;height:10px}
-#joblog{font-size:12px;color:var(--mut);white-space:pre-wrap;word-break:break-all;max-height:160px;overflow:auto}
-.view{display:none}
-.view.active{display:block}
+input[type=text],select{background:var(--bg);color:var(--txt);border:1px solid var(--line2);border-radius:var(--r);padding:11px 12px;font-size:14px}
+input[type=text]{flex:1;min-width:170px}
+select{max-width:100%}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:14px;margin-bottom:12px}
+.card h2{font-size:13px;margin:0 0 10px;letter-spacing:.8px;text-transform:uppercase;color:var(--mut);font-weight:700}
+.row{display:flex;gap:8px;align-items:center;margin:10px 0;flex-wrap:wrap}
+.hint{font-size:12px;color:var(--mut);line-height:1.5}
+.err{background:transparent;border:1px solid var(--bad);border-left-width:4px;padding:10px;display:none;margin:8px 0;font-size:14px;color:var(--bad)}
+.ok{background:transparent;border:1px solid var(--ok);border-left-width:4px;padding:10px;display:none;margin:8px 0;font-size:14px;color:var(--ok)}
+.badge{display:inline-block;font-size:11px;padding:3px 8px;background:var(--bg2);border:1px solid var(--line2);color:var(--mut);margin-left:6px;font-weight:600;vertical-align:middle}
+.badge.mkv,.badge.copy{color:var(--bad);border-color:var(--bad)}
+.badge.mp4,.badge.zc{color:var(--ok);border-color:var(--ok)}
+.badge.kind{color:var(--acc);border-color:var(--acc)}
+/* Biblioteca */
+.grid{display:grid;grid-template-columns:1fr;gap:10px}
+@media(min-width:640px){.grid{grid-template-columns:1fr 1fr}}
+.item{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:13px;display:flex;gap:12px}
+.thumb{width:52px;height:72px;flex:none;background:var(--bg2);border:1px solid var(--line);display:grid;place-items:center;color:var(--dim);font-size:11px;font-weight:700;overflow:hidden}
+.thumb img{width:100%;height:100%;object-fit:cover}
+.item .body{flex:1;min-width:0}
+.item .t{font-weight:650;font-size:14.5px;word-break:break-word;line-height:1.35}
+.item .m{font-size:12px;color:var(--mut);margin:5px 0 9px}
+.item .actions{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+.item .tools{display:flex;gap:7px;flex-wrap:wrap;margin-top:8px;align-items:center}
+.item .tools input,.item .tools select{padding:8px 10px;font-size:13px}
+.chip{font-size:11px;color:var(--dim)}
+li.file-li{list-style:none}
+/* Colecciones */
+.cols{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+@media(min-width:640px){.cols{grid-template-columns:repeat(3,1fr)}}
+@media(min-width:900px){.cols{grid-template-columns:repeat(4,1fr)}}
+.col{background:var(--card);border:1px solid var(--line);overflow:hidden;cursor:pointer}
+.col[aria-expanded="true"]{border-color:var(--acc)}
+.col .poster{aspect-ratio:2/3;background:var(--bg2);border-bottom:1px solid var(--line);display:grid;place-items:center;color:var(--dim);font-size:11px;font-weight:700;letter-spacing:1px;overflow:hidden}
+.col .poster img{width:100%;height:100%;object-fit:cover}
+.col .cap{padding:10px 11px}
+.col .cap .t{font-weight:650;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.col .cap .m{font-size:11.5px;color:var(--mut);margin-top:3px}
+.col .cap .ops{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.col .cap .ops button{padding:6px 9px;font-size:12px}
+/* Acordeón inline bajo el grid */
+.tree{border:1px solid var(--line);border-top:0;background:var(--card);padding:12px;margin:-12px 0 12px;grid-column:1/-1}
+.kid{border:1px solid var(--line);margin:0 0 10px;background:var(--bg2)}
+.kid>button.head{width:100%;display:flex;gap:10px;align-items:center;background:transparent;border:0;color:var(--txt);padding:10px 12px;font-size:14px;font-weight:650;cursor:pointer;text-align:left}
+.kid>button.head .n{margin-left:auto;font-size:11px;color:var(--mut);font-weight:400}
+.kid .eps{border-top:1px solid var(--line);padding:10px;display:grid;gap:10px;grid-template-columns:1fr}
+@media(min-width:640px){.kid .eps{grid-template-columns:1fr 1fr}}
+.kid .mini{font-size:11px;color:var(--mut)}
+.kid .ktools{display:flex;gap:7px;flex-wrap:wrap;padding:0 12px 12px;align-items:center}
+.kid .ktools input,.kid .ktools select{padding:8px 10px;font-size:13px}
+.detail{display:flex;gap:14px;flex-wrap:wrap}
+.detail .big{width:150px;flex:none}
+.detail .big .poster{aspect-ratio:2/3;overflow:hidden;border:1px solid var(--line2);background:var(--bg2);display:grid;place-items:center;color:var(--dim);font-size:11px;font-weight:700}
+.detail .big .poster img{width:100%;height:100%;object-fit:cover}
+.season{margin:14px 0 6px;font-size:12px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;color:var(--txt);border-bottom:1px solid var(--line);padding-bottom:6px}
+.season .ctl{float:right;display:flex;gap:6px}
+.season .ctl button{padding:5px 9px;font-size:12px}
+.childbox{border:1px solid var(--line);background:var(--bg2);padding:12px;margin:0 0 12px}
+.childbox h3{margin:0 0 8px;font-size:14px}
+.dragging{opacity:.45}
+.drop-target{outline:2px dashed var(--acc);outline-offset:2px}
+.orderctl{display:flex;gap:4px}
+.orderctl button{padding:5px 8px;font-size:12px}
+progress{width:100%;height:8px;appearance:none}
+progress::-webkit-progress-bar{background:var(--bg)}
+progress::-webkit-progress-value{background:var(--acc)}
+#joblog{font-size:12px;color:var(--mut);white-space:pre-wrap;word-break:break-all;max-height:150px;overflow:auto}
+/* Player modal */
+#overlay{display:none;position:fixed;inset:0;z-index:50;background:rgba(4,5,7,.85);padding:16px}
+#overlay.open{display:grid;place-items:center}
+#modal{width:min(920px,100%);background:var(--bg2);border:1px solid var(--line2);overflow:hidden}
+#modal .mhead{display:flex;gap:10px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--line)}
+#modal .mhead .t{flex:1;font-weight:650;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+video{width:100%;background:#000;max-height:62vh;display:block}
+#modal .mfoot{display:flex;gap:8px;padding:12px 14px;flex-wrap:wrap;align-items:center}
+#toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);z-index:60;display:flex;flex-direction:column;gap:8px;align-items:center}
+#toast div{background:var(--bg2);border:1px solid var(--line2);padding:10px 14px;font-size:13px}
+label.check{display:flex;gap:8px;align-items:center;font-size:13px;color:var(--mut)}
+.empty{border:1px dashed var(--line2);padding:26px;text-align:center;color:var(--mut);font-size:14px}
 </style>
 </head>
 <body>
-<header>
-<h1>p2p-nube · Baúl</h1>
-<div class="sub" id="info">conectando…</div>
-</header>
+<header class="top"><div class="wrap">
+  <div class="bar">
+    <div class="mark">NUBE</div>
+    <h1>p2p-nube · Baúl<small id="info">conectando…</small></h1>
+    <input id="search" type="text" placeholder="Buscar…" oninput="render()">
+  </div>
+  <nav class="tabs" role="tablist">
+    <button id="tab-list" aria-selected="true" onclick="show('list')">Biblioteca</button>
+    <button id="tab-cols" aria-selected="false" class="ghost" onclick="show('cols')">Colecciones</button>
+    <button id="tab-add" aria-selected="false" class="ghost" onclick="show('add')">Añadir</button>
+  </nav>
+</div></header>
 <main>
-<nav class="tabs" role="tablist">
-<button id="tab-list" aria-selected="true" onclick="show('list')">Biblioteca</button>
-<button id="tab-add" aria-selected="false" class="ghost" onclick="show('add')">Añadir</button>
-</nav>
-
-<!-- ============ VISTA: BIBLIOTECA ============ -->
+<!-- ============ BIBLIOTECA ============ -->
 <section id="view-list" class="view active">
-<div class="row">
-<button id="reload">Recargar lista</button>
-<button id="home" class="ghost">Ocultar player</button>
-</div>
-<div class="err" id="err"></div>
-<section id="player">
-<video id="v" controls playsinline preload="metadata"></video>
-<div class="hint" id="now"></div>
+  <div class="toolbar">
+    <button id="reload" class="dim" onclick="refresh()">Recargar lista</button>
+    <span class="chip" id="count"></span>
+    <span class="chip" id="ns">Cache-Control: no-store · sin persistencia en el visor</span>
+  </div>
+  <div class="err" id="err"></div>
+  <div class="grid" id="list"></div>
+  <p class="hint">Catálogo + lanzador: MP4/WebM se reproducen aquí mismo con <b>Ver aquí</b>; MKV (HEVC + FLAC) se abre en <b>VLC</b> fuera del navegador, sin convertir. El botón VLC está siempre disponible — es la vía principal para MKV.</p>
 </section>
-<ul id="list"></ul>
-<p class="hint">Catálogo + lanzador: MP4 se reproduce aquí mismo; MKV (HEVC + FLAC) se abre en VLC fuera de Chrome, sin convertir (<span id="ns">Cache-Control: no-store</span>).</p>
+<!-- ============ COLECCIONES ============ -->
+<section id="view-cols" class="view">
+  <div class="err" id="colserr"></div>
+  <div class="ok" id="colsok"></div>
+  <div class="card">
+    <h2>Nueva colección · Serie / Película</h2>
+    <div class="row">
+      <input type="text" id="newcoltitle" placeholder="Título — p.ej. Frieren, Akira…" autocomplete="off" spellcheck="false">
+      <select id="newcolkind"><option value="series">Serie → Temporadas</option><option value="movie">Película suelta</option></select>
+      <button onclick="createCol()">Crear</button>
+    </div>
+    <p class="hint">Las series agrupan <b>sub-colecciones</b> (temporadas o películas/partes) y los episodios viven dentro de ellas. Carpetas ficticias: no mueven ni renombran nada en disco. Mover un episodio lo saca de su lugar anterior.</p>
+  </div>
+  <div class="cols" id="cols"></div>
+  <div id="treebox"></div>
+  <div class="card" id="detail" style="display:none"></div>
 </section>
-
-<!-- ============ VISTA: AÑADIR ============ -->
+<!-- ============ AÑADIR ============ -->
 <section id="view-add" class="view">
-<div class="err" id="adderr"></div>
-<div class="ok" id="addok"></div>
-
-<div class="card">
-<h2>Escanear carpeta del host <span class="badge badge-zc">Zero-Copy</span></h2>
-<div class="row">
-<input type="text" id="folderpath" placeholder="/home/uriel/mnt/Storage/Anime/Temporada1" autocomplete="off" spellcheck="false">
-<label class="check"><input type="checkbox" id="recursive"> subcarpetas</label>
-<button id="btn-scan" onclick="scanFolder()">Escanear</button>
-</div>
-<div id="jobbox" style="display:none">
-<div class="row"><progress id="jobbar" max="100" value="0"></progress><span class="hint" id="jobtxt"></span></div>
-<div id="joblog"></div>
-</div>
-<p class="hint">⚡ <strong>Cero copias:</strong> Indexa carpetas de tu disco local o secundario sin mover ni duplicar archivos. El streaming lee directamente desde la ubicación original.</p>
-</div>
-
-<div class="card">
-<h2>Añadir archivo por ruta <span class="badge badge-zc">Zero-Copy</span></h2>
-<div class="row">
-<input type="text" id="filepath" placeholder="/home/uriel/mnt/Storage/Videos/cap01.mkv" autocomplete="off" spellcheck="false">
-<button id="btn-add" onclick="addFile()">Añadir</button>
-</div>
-<p class="hint">⚡ Referencia directa a la ruta del archivo en el servidor. No consume espacio adicional.</p>
-</div>
-
-<div class="card">
-<h2>Subir desde este dispositivo <span class="badge badge-copy">Copia al host</span></h2>
-<div class="row">
-<input type="file" id="fileinput" accept="video/*,.mkv,.mp4,.webm,.avi" multiple>
-<button id="btn-upload" onclick="uploadFiles()">Subir</button>
-</div>
-<div id="upbox" style="display:none">
-<div class="row"><progress id="upbar" max="100" value="0"></progress><span class="hint" id="uptxt"></span></div>
-</div>
-<p class="hint">⚠️ <strong>Solo para subir archivos desde el móvil u otro equipo al host.</strong> Si estás en el PC anfitrión, usa "Escanear carpeta" arriba para no duplicar gigabytes en tu SSD (tope 8 GiB por archivo).</p>
-</div>
+  <div class="err" id="adderr"></div>
+  <div class="ok" id="addok"></div>
+  <div class="card">
+    <h2>Escanear carpeta del host <span class="badge badge-zc">Zero-Copy</span></h2>
+    <div class="row">
+      <input type="text" id="folderpath" placeholder="/home/uriel/mnt/Storage/Anime/Temporada1" autocomplete="off" spellcheck="false">
+      <label class="check"><input type="checkbox" id="recursive"> subcarpetas</label>
+      <button id="btn-scan" onclick="scanFolder()">Escanear</button>
+    </div>
+    <div class="row">
+      <input type="text" id="scan-col" placeholder="Agrupar en serie (opcional) — p.ej. Frieren" autocomplete="off" spellcheck="false">
+      <select id="scan-kind"><option value="series">Serie</option><option value="movie">Película</option></select>
+      <input type="text" id="scan-season" placeholder="Temporada 1 (crea la sub-colección)" style="max-width:220px">
+    </div>
+    <div id="jobbox" style="display:none">
+      <div class="row"><progress id="jobbar" max="100" value="0"></progress><span class="hint" id="jobtxt"></span></div>
+      <div id="joblog"></div>
+    </div>
+    <p class="hint">Cero copias: indexa sin mover ni duplicar. Si rellenas la serie, los vídeos se agrupan en su temporada al terminar el escaneo.</p>
+  </div>
+  <div class="card">
+    <h2>Añadir archivo por ruta <span class="badge badge-zc">Zero-Copy</span></h2>
+    <div class="row">
+      <input type="text" id="filepath" placeholder="/home/uriel/mnt/Storage/Videos/cap01.mkv" autocomplete="off" spellcheck="false">
+      <button id="btn-add" onclick="addFile()">Añadir</button>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Subir desde este dispositivo <span class="badge badge-copy">Copia al host</span></h2>
+    <div class="row">
+      <input type="file" id="fileinput" accept="video/*,.mkv,.mp4,.webm,.avi" multiple>
+      <button id="btn-upload" onclick="uploadFiles()">Subir</button>
+    </div>
+    <div id="upbox" style="display:none">
+      <div class="row"><progress id="upbar" max="100" value="0"></progress><span class="hint" id="uptxt"></span></div>
+    </div>
+    <p class="hint">Solo para traer archivos desde el móvil u otro equipo. En el PC anfitrión usa Escanear (tope 8 GiB por archivo).</p>
+  </div>
 </section>
 </main>
+<!-- ============ PLAYER ============ -->
+<div id="overlay" onclick="if(event.target===this)closePlayer()">
+  <div id="modal">
+    <div class="mhead"><div class="t" id="mtitle"></div><button class="dim small" onclick="closePlayer()">Cerrar</button></div>
+    <video id="v" controls playsinline preload="metadata"></video>
+    <div class="mfoot"><a id="mvlc" href="#"><button class="ghost small">Abrir en VLC</button></a><button class="dim small" onclick="copyUrl(cur,event)">Copiar URL</button><span class="hint" id="mnote"></span></div>
+  </div>
+</div>
+<div id="toast"></div>
 <script>
 const $=s=>document.querySelector(s);
-function show(which){
-  for(const v of ['list','add']){
-    $('#view-'+v).classList.toggle('active', v===which);
-    $('#tab-'+v).setAttribute('aria-selected', v===which?'true':'false');
-  }
-}
+let FILES=[],COLS=[],cur=null,curDetail=null,expandedRoot=null,expandedKid=null,DETAILCACHE={};
+function show(w){for(const v of ['list','cols','add']){$('#view-'+v).classList.toggle('active',v===w);$('#tab-'+v).setAttribute('aria-selected',v===w?'true':'false');}if(w==='cols')loadCols();}
+function toast(m){const d=document.createElement('div');d.textContent=m;$('#toast').appendChild(d);setTimeout(()=>d.remove(),2600);}
 function err(m){const e=$('#err');e.style.display='block';e.textContent=m;}
 function clear(){const e=$('#err');e.style.display='none';}
 function aerr(m){const e=$('#adderr');e.style.display='block';e.textContent=m;}
 function aclear(){const e=$('#adderr');e.style.display='none';$('#addok').style.display='none';}
 function aok(m){const e=$('#addok');e.style.display='block';e.textContent=m;}
+function cerr(m){const e=$('#colserr');e.style.display='block';e.textContent=m;}
+function cok(m){const e=$('#colsok');e.style.display='block';e.textContent=m;setTimeout(()=>e.style.display='none',3000);}
 function fmt(n){if(n>1e9)return (n/1e9).toFixed(1)+' GB';if(n>1e6)return (n/1e6).toFixed(1)+' MB';if(n>1e3)return (n/1e3).toFixed(0)+' KB';return n+' B';}
+function disp(f){return (f.title&&f.title.trim())?f.title:(f.path||'').split('/').pop();}
 function isMkv(f){return (f.path||'').toLowerCase().endsWith('.mkv')||(f.mime||'').includes('matroska');}
 function streamUrl(f){return location.origin+'/stream/'+f.hash;}
-function vlcIntent(f){const scheme=location.protocol.replace(':','');const title=encodeURIComponent(f.path||'video');const fb=encodeURIComponent(streamUrl(f));return 'intent://'+location.host+'/stream/'+f.hash+'#Intent;action=android.intent.action.VIEW;scheme='+scheme+';package=org.videolan.vlc;type=video/*;S.title='+title+';S.browser_fallback_url='+fb+';end';}
-async function copyUrl(f,btn){const u=streamUrl(f);try{await navigator.clipboard.writeText(u);btn.textContent='✓ Copiada';setTimeout(()=>btn.textContent='Copiar URL',1500);}catch(e){prompt('Copia la URL para VLC:',u);}}
+function vlcIntent(f){const scheme=location.protocol.replace(':','');const title=encodeURIComponent(disp(f));const fb=encodeURIComponent(streamUrl(f));return 'intent://'+location.host+'/stream/'+f.hash+'#Intent;action=android.intent.action.VIEW;scheme='+scheme+';package=org.videolan.vlc;type=video/*;S.title='+title+';S.browser_fallback_url='+fb+';end';}
+function posterOf(c){if(!c)return '';if(c.poster_file)return c.poster_file;if(c.poster_url)return c.poster_url;return '';}
+function kindTag(c){if(!c)return '';if(c.parent_id)return c.kind==='movie'?'PELÍCULA':'TEMPORADA';return c.kind==='movie'?'PELÍCULA':'SERIE';}
+function roots(){return COLS.filter(c=>!c.parent_id).sort((a,b)=>((a.pos||0)-(b.pos||0))||((a.created_at||0)-(b.created_at||0)));}
+function kidsOf(rid){return COLS.filter(c=>c.parent_id===rid).sort((a,b)=>((a.pos||0)-(b.pos||0))||((a.created_at||0)-(b.created_at||0)));}
+// La API devuelve el detalle plano {id,kind,...,items,children:[{id,...,items}]}
+// por compat con tests; la UI trabaja con {collection,items,children:[{collection,items}]}.
+function normCol(c){return {id:c.id||'',kind:c.kind||'series',title:c.title||'',poster_url:c.poster_url||'',poster_file:c.poster_file||'',created_at:c.created_at||0,parent_id:c.parent_id||'',pos:c.pos||0};}
+function normDetail(d){
+  if(!d||typeof d!=='object')return {collection:normCol({}),items:[],children:[]};
+  if(d.collection&&typeof d.collection==='object'){
+    const cols=d.collection.parent_id==null?Object.assign({},d,{parent_id:''}):d.collection;
+    return {collection:normCol(cols),items:Array.isArray(d.items)?d.items:[],children:(Array.isArray(d.children)?d.children:[]).map(k=>{
+      if(k&&k.collection)return {collection:normCol(k.collection),items:Array.isArray(k.items)?k.items:[]};
+      if(!k||typeof k!=='object')return {collection:normCol({}),items:[]};
+      const {items,children,...c}=k;return {collection:normCol(c),items:Array.isArray(items)?items:[]};
+    })};
+  }
+  const {items,children,...c}=d;
+  return {collection:normCol(c),items:Array.isArray(items)?items:[],children:(Array.isArray(children)?children:[]).map(k=>{
+    if(k&&k.collection)return {collection:normCol(k.collection),items:Array.isArray(k.items)?k.items:[]};
+    if(!k||typeof k!=='object')return {collection:normCol({}),items:[]};
+    const {items:ki,...kc}=k;return {collection:normCol(kc),items:Array.isArray(ki)?ki:[]};
+  })};
+}
+function leaves(){const out=[];const seen=new Set();const push=(c)=>{if(!c||!c.id||seen.has(c.id))return;seen.add(c.id);out.push(c);};for(const r of roots()){const k=kidsOf(r.id);if(!k.length)push(r);else for(const c of k)push(c);}return out;}
+function leafLabel(c){if(!c.parent_id)return (c.kind==='movie'?'Película: ':'Serie (suelta): ')+c.title;const p=COLS.find(r=>r.id===c.parent_id);return (p?p.title:'?')+' › '+c.title;}
+async function copyUrl(f,ev){if(ev)ev.preventDefault();const u=streamUrl(f||cur||{hash:''});try{await navigator.clipboard.writeText(u);toast('URL copiada para VLC');}catch(e){prompt('Copia la URL para VLC:',u);}}
 async function info(){try{const r=await fetch('/api/info');const j=await r.json();$('#info').textContent='nodo '+j.endpoint_id.slice(0,12)+'… · '+j.files+' archivo(s)';}catch(e){$('#info').textContent='sin conexión con el host';}}
-async function files(){clear();try{const r=await fetch('/api/files');if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();j.sort((a,b)=>(a.path||'').localeCompare(b.path||'',undefined,{numeric:true}));const ul=$('#list');ul.innerHTML='';if(!j.length){ul.innerHTML='<li><div class="t">Vacío</div><div class="m">El host aún no marcó archivos para transmitir.</div></li>';return;}for(const f of j){const li=document.createElement('li');li.innerHTML='<div class="t"></div><div class="m"></div><div class="row"></div>';li.querySelector('.t').textContent=f.path;const sp=document.createElement('span');sp.className='badge';sp.textContent=f.policy;li.querySelector('.t').appendChild(sp);const web=document.createElement('span');web.className='badge';const mkv=isMkv(f);web.textContent=mkv?'Web: no · VLC: sí':'Web: sí';li.querySelector('.t').appendChild(web);li.querySelector('.m').textContent=fmt(f.size)+' · '+f.mime;const row=li.querySelector('.row');if(mkv){const note=document.createElement('div');note.className='hint';note.textContent='MKV HEVC + FLAC: Chrome no lo decodifica. Ábrelo en VLC.';li.appendChild(note);const a=document.createElement('a');a.href=vlcIntent(f);const b=document.createElement('button');b.textContent='Abrir en VLC';a.appendChild(b);row.appendChild(a);const c=document.createElement('button');c.className='ghost';c.textContent='Copiar URL';c.onclick=()=>copyUrl(f,c);row.appendChild(c);}else{const b=document.createElement('button');b.textContent='▶ Reproducir';b.onclick=()=>play(f);row.appendChild(b);const a=document.createElement('a');a.href=vlcIntent(f);a.style.marginLeft='8px';const v=document.createElement('button');v.className='ghost';v.textContent='VLC';a.appendChild(v);row.appendChild(a);}const q=document.createElement('button');q.className='danger';q.textContent='Quitar';q.title='Quita de la lista y libera espacio en el servidor';q.onclick=()=>removeFile(f,q);row.appendChild(q);ul.appendChild(li);}}catch(e){err('No se pudo cargar la lista: '+e.message+' (¿host caído?)');}}
-async function removeFile(f,btn){if(!confirm('¿Quitar "'+f.path+'" de la lista? Dejará de servirse y su espacio en el host se libera en ~1 min (GC). No borra tu archivo original.'))return;btn.disabled=true;try{const r=await fetch('/api/files/'+f.hash,{method:'DELETE'});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));files();info();}catch(e){err('No se pudo quitar: '+e.message);}finally{btn.disabled=false;}}
-async function uploadFiles(){aclear();const inp=$('#fileinput');if(!inp.files.length){aerr('Elige al menos un archivo con el selector.');return;}$('#btn-upload').disabled=true;$('#upbox').style.display='block';let ok=0;const errs=[];for(let i=0;i<inp.files.length;i++){const f=inp.files[i];$('#uptxt').textContent=(i+1)+'/'+inp.files.length+' · '+f.name;$('#upbar').value=Math.round(i/inp.files.length*100);const fd=new FormData();fd.append('file',f,f.name);try{const r=await fetch('/api/library/upload',{method:'POST',body:fd});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));ok++;}catch(e){errs.push(f.name+': '+e.message);}}$('#upbar').value=100;$('#uptxt').textContent=inp.files.length+'/'+inp.files.length;inp.value='';if(errs.length)aerr('Subidos '+ok+' de '+inp.files.length+'. Errores: '+errs.join(' | '));else aok('✓ Subido(s): '+ok+' archivo(s) en la lista.');files();info();$('#btn-upload').disabled=false;}
-async function addFile(){aclear();const p=$('#filepath').value.trim();if(!p){aerr('Escribe la ruta del archivo en el servidor.');return;}$('#btn-add').disabled=true;try{const r=await fetch('/api/library/add-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));aok('✓ Añadido: '+j.path+' ('+fmt(j.size)+')');$('#filepath').value='';files();info();}catch(e){aerr('No se pudo añadir: '+e.message);}finally{$('#btn-add').disabled=false;}}
-async function scanFolder(){aclear();const p=$('#folderpath').value.trim();if(!p){aerr('Escribe la ruta de la carpeta en el servidor.');return;}$('#btn-scan').disabled=true;$('#jobbox').style.display='none';try{const r=await fetch('/api/library/scan-folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p,recursive:$('#recursive').checked})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));if(j.found===0){aok('Carpeta vacía: no hay vídeos.');return;}$('#jobbox').style.display='block';pollJob(j.job_id);}catch(e){aerr('No se pudo escanear: '+e.message);$('#btn-scan').disabled=false;}}
-async function pollJob(id){try{const r=await fetch('/api/library/jobs/'+id);const j=await r.json();const pct=j.total?Math.round(j.done/j.total*100):100;$('#jobbar').value=pct;$('#jobtxt').textContent=j.done+'/'+j.total+' · '+j.status;$('#joblog').textContent=(j.errors||[]).join('\n');if(j.status==='running'){setTimeout(()=>pollJob(id),1000);return;}const ok=(j.added||[]).length;aok('Escaneo '+j.status+': '+ok+' añadido(s)'+(j.errors.length?' · '+j.errors.length+' con error (ver detalle)':''));files();info();}catch(e){aerr('Sin estado del escaneo: '+e.message);}finally{if($('#jobtxt').textContent.indexOf('running')<0)$('#btn-scan').disabled=false;}}
-function play(f){clear();const v=$('#v');$('#player').style.display='block';$('#now').textContent=f.path+' · '+f.policy;v.src='/stream/'+f.hash;v.play().catch(()=>{});$('#player').scrollIntoView();}
-$('#v').addEventListener('error',()=>{const v=$('#v');err('Error de reproducción (código '+(v.error?v.error.code:'?')+'). Si es 404 el host está offline; si es 416 pide otro rango.');});
-$('#reload').onclick=()=>{info();files();};
-$('#home').onclick=()=>{const v=$('#v');v.pause();v.removeAttribute('src');v.load();$('#player').style.display='none';};
+async function refresh(){await info();await files();await loadCols(true);}
+async function files(){clear();try{const r=await fetch('/api/files');if(!r.ok)throw new Error('HTTP '+r.status);FILES=await r.json();render();}catch(e){err('No se pudo cargar la lista: '+e.message);}}
+function render(){
+  const q=($('#search').value||'').toLowerCase();
+  const box=$('#list');box.innerHTML='';
+  const items=FILES.filter(f=>(disp(f)+' '+(f.path||'')).toLowerCase().includes(q)).sort((a,b)=>disp(a).localeCompare(disp(b),undefined,{numeric:true}));
+  $('#count').textContent=items.length+' / '+FILES.length;
+  if(!items.length){box.innerHTML='<div class="empty">Vacío — añade vídeos desde la pestaña Añadir.</div>';return;}
+  for(const f of items){box.appendChild(fileCard(f));}
+}
+function badgeFor(f){const s=document.createElement('span');const mkv=isMkv(f);s.className='badge '+(mkv?'mkv':'mp4');s.textContent=mkv?'MKV · VLC':'MP4 · Web + VLC';return s;}
+function leafSelect(current){
+  const sel=document.createElement('select');
+  sel.innerHTML='<option value="">Mover a…</option>';
+  for(const c of leaves().sort((a,b)=>leafLabel(a).localeCompare(leafLabel(b)))){
+    const o=document.createElement('option');o.value=c.id;o.textContent=leafLabel(c);sel.appendChild(o);
+  }
+  if(current)sel.value=current;
+  return sel;
+}
+function fileCard(f,leafId,posterUrl){
+  const d=document.createElement('div');d.className='item';
+  const th=document.createElement('div');th.className='thumb';
+  if(posterUrl){const im=document.createElement('img');im.loading='lazy';im.src=posterUrl;im.alt='';th.appendChild(im);}
+  else th.textContent=isMkv(f)?'MKV':'MP4';
+  d.appendChild(th);
+  const b=document.createElement('div');b.className='body';d.appendChild(b);
+  const t=document.createElement('div');t.className='t';t.textContent=disp(f);t.appendChild(badgeFor(f));b.appendChild(t);
+  const m=document.createElement('div');m.className='m';m.textContent=(f.path||'')+' · '+fmt(f.size)+' · '+f.mime;b.appendChild(m);
+  const a=document.createElement('div');a.className='actions';b.appendChild(a);
+  const mkv=isMkv(f);
+  if(!mkv){const p=document.createElement('button');p.className='small';p.textContent='▶ Ver aquí';p.onclick=()=>play(f);a.appendChild(p);}
+  else{const p=document.createElement('button');p.className='dim small';p.textContent='Probar en web';p.onclick=()=>play(f);a.appendChild(p);}
+  const va=document.createElement('a');va.href=vlcIntent(f);const vb=document.createElement('button');vb.className='ghost small';vb.textContent='VLC';va.appendChild(vb);a.appendChild(va);
+  const cp=document.createElement('button');cp.className='dim small';cp.textContent='Copiar URL';cp.onclick=()=>copyUrl(f);a.appendChild(cp);
+  const q=document.createElement('button');q.className='danger small';q.textContent='Quitar';q.onclick=()=>removeFile(f,q);a.appendChild(q);
+  const tools=document.createElement('div');tools.className='tools';b.appendChild(tools);
+  const rn=document.createElement('input');rn.type='text';rn.placeholder='Renombrar título visible…';rn.value=(f.title||'');rn.style.maxWidth='190px';tools.appendChild(rn);
+  const rb=document.createElement('button');rb.className='dim small';rb.textContent='Guardar';rb.title='Guardar título';rb.onclick=()=>renameFile(f,rn.value,rb);tools.appendChild(rb);
+  const sel=leafSelect(leafId||'');tools.appendChild(sel);
+  const mb=document.createElement('button');mb.className='dim small';mb.textContent='Mover';mb.onclick=()=>moveFile(f,sel.value,mb);tools.appendChild(mb);
+  if(mkv){const h=document.createElement('div');h.className='hint';h.textContent='MKV HEVC: Chrome no lo decodifica — usa VLC.';b.appendChild(h);}
+  return d;
+}
+async function renameFile(f,title,btn){btn.disabled=true;try{const r=await fetch('/api/files',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:f.path,title})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));f.title=title;toast('Título guardado');render();if(curDetail)openCol(curDetail,true);}catch(e){toast('No se pudo renombrar: '+e.message);}finally{btn.disabled=false;}}
+async function moveFile(f,cid,btn){if(!cid){toast('Elige una sub-colección destino');return;}btn.disabled=true;try{const r=await fetch('/api/collections/'+cid+'/items',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file_path:f.path,season:'',label:'',pos:0})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));toast('Movido');DETAILCACHE={};await loadCols(true);if(curDetail)openCol(curDetail,true);if(expandedRoot)renderTree();}catch(e){toast('No se pudo mover: '+e.message);}finally{btn.disabled=false;}}
+async function reorderItems(cid,order){try{const r=await fetch('/api/collections/'+cid+'/items/order',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({order})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));DETAILCACHE={};if(curDetail)openCol(curDetail,true);if(expandedRoot)renderTree();}catch(e){cerr('No se pudo reordenar: '+e.message);}}
+async function reorderChildren(rootId,order){try{const r=await fetch('/api/collections/'+rootId+'/children/order',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({order})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));DETAILCACHE={};await loadCols(true);if(curDetail)openCol(curDetail,true);if(expandedRoot)renderTree();}catch(e){cerr('No se pudo reordenar: '+e.message);}}
+function moveInList(arr,from,to){if(to<0||to>=arr.length||from<0||from>=arr.length)return arr;const c=arr.slice();const [x]=c.splice(from,1);c.splice(to,0,x);return c;}
+function enableDrop(zone,onDrop){zone.addEventListener('dragover',(ev)=>{ev.preventDefault();zone.classList.add('drop-target');});zone.addEventListener('dragleave',()=>zone.classList.remove('drop-target'));zone.addEventListener('drop',(ev)=>{ev.preventDefault();zone.classList.remove('drop-target');const idx=Number(ev.dataTransfer.getData('text/plain'));if(!Number.isNaN(idx))onDrop(idx,ev);});}
+async function removeFile(f,btn){if(!confirm('¿Quitar "'+disp(f)+'" de la lista? Libera espacio en ~1 min. No borra tu original.'))return;btn.disabled=true;try{const r=await fetch('/api/files/'+f.hash,{method:'DELETE'});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));DETAILCACHE={};await files();await info();if(expandedRoot)renderTree();}catch(e){err('No se pudo quitar: '+e.message);}finally{btn.disabled=false;}}
+/* ---- Colecciones: grid + acordeón + detalle ---- */
+async function loadCols(silent){try{const r=await fetch('/api/collections');COLS=await r.json();renderCols();if(expandedRoot)await renderTree();if(curDetail)openCol(curDetail,true);if(!silent)render();}catch(e){if(!silent)cerr('Sin colecciones: '+e.message);}}
+function renderCols(){
+  const box=$('#cols');box.innerHTML='';
+  const rs=roots();
+  if(!rs.length){box.innerHTML='<div class="empty">Sin colecciones — crea tu primera Serie o Película arriba.</div>';$('#treebox').innerHTML='';return;}
+  for(const c of rs){
+    const k=kidsOf(c.id);
+    const d=document.createElement('div');d.className='col';d.setAttribute('aria-expanded',expandedRoot===c.id?'true':'false');
+    d.setAttribute('role','button');d.setAttribute('tabindex','0');
+    const toggle=(ev)=>{if(ev&&(ev.target.closest('button')||ev.target.closest('input')||ev.target.closest('select')||ev.target.closest('a')))return;expandedRoot=expandedRoot===c.id?null:c.id;expandedKid=null;renderCols();renderTree();};
+    d.onclick=toggle;
+    d.onkeydown=(ev)=>{if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();toggle(ev);}};
+    const p=document.createElement('div');p.className='poster';const u=posterOf(c);
+    if(u){const im=document.createElement('img');im.loading='lazy';im.src=u;im.alt='';p.appendChild(im);}else p.textContent=kindTag(c);
+    d.appendChild(p);
+    const cap=document.createElement('div');cap.className='cap';d.appendChild(cap);
+    const t=document.createElement('div');t.className='t';t.textContent=c.title;cap.appendChild(t);
+    const m=document.createElement('div');m.className='m';
+    m.textContent=c.kind==='movie'?('Película · '+c.items+' título(s)'):(k.length+' sub-colección(es) · '+c.items+' episodio(s)');
+    cap.appendChild(m);
+    const ops=document.createElement('div');ops.className='ops';cap.appendChild(ops);
+    const open=document.createElement('button');open.className='dim';open.textContent='Editar';open.onclick=(ev)=>{ev.stopPropagation();openCol(c.id);};ops.appendChild(open);
+    const tg=document.createElement('button');tg.className='ghost';tg.textContent=expandedRoot===c.id?'Contraer':'Desplegar';tg.onclick=(ev)=>{ev.stopPropagation();expandedRoot=expandedRoot===c.id?null:c.id;expandedKid=null;renderCols();renderTree();};ops.appendChild(tg);
+    box.appendChild(d);
+  }
+}
+async function fetchDetail(id){
+  if(DETAILCACHE[id])return normDetail(DETAILCACHE[id]);
+  const r=await fetch('/api/collections/'+id);if(!r.ok)throw new Error('HTTP '+r.status);
+  const raw=await r.json();DETAILCACHE[id]=raw;return normDetail(raw);
+}
+function epCard(it,cid,posterUrl){
+  const f={path:it.file_path,hash:it.hash,size:it.size,mime:it.mime,title:it.title};
+  const card=fileCard(f,cid,posterUrl);
+  const tools=card.querySelector('.tools');if(tools)tools.remove();
+  const acts=card.querySelector('.actions');
+  const out=document.createElement('button');out.className='dim small';out.textContent='Sacar';out.onclick=()=>unlink(cid,it.file_path);
+  acts.appendChild(out);
+  if(it.label){const lb=document.createElement('span');lb.className='badge';lb.textContent=it.label;card.querySelector('.t').appendChild(lb);}
+  return card;
+}
+function orderButtons(onUp,onDown){
+  const s=document.createElement('span');s.className='orderctl';
+  const up=document.createElement('button');up.className='dim small';up.textContent='↑';up.title='Subir';up.onclick=(e)=>{e.stopPropagation();onUp();};s.appendChild(up);
+  const dn=document.createElement('button');dn.className='dim small';dn.textContent='↓';dn.title='Bajar';dn.onclick=(e)=>{e.stopPropagation();onDown();};s.appendChild(dn);
+  return s;
+}
+async function renderTree(){
+  const box=$('#treebox');box.innerHTML='';
+  if(!expandedRoot)return;
+  const wrap=document.createElement('div');wrap.className='tree';box.appendChild(wrap);
+  try{
+    const raw=await fetchDetail(expandedRoot);
+    const d=normDetail(raw);
+    const rootPoster=posterOf(d.collection);
+    if(!d.children.length){
+      if(!d.items.length){wrap.innerHTML='<div class="empty">Vacía — mueve archivos desde Biblioteca eligiendo esta colección como destino.</div>';}
+      else{
+        const g=document.createElement('div');g.className='grid';wrap.appendChild(g);
+        const sorted=d.items.slice().sort((a,b)=>((a.pos||0)-(b.pos||0))||String(a.title||'').localeCompare(String(b.title||''),undefined,{numeric:true}));
+        sorted.forEach((it,idx)=>{
+          const card=epCard(it,d.collection.id,rootPoster);
+          card.draggable=true;card.dataset.idx=idx;
+          card.addEventListener('dragstart',(e)=>{e.dataTransfer.setData('text/plain',String(idx));card.classList.add('dragging');});
+          card.addEventListener('dragend',()=>card.classList.remove('dragging'));
+          const acts=card.querySelector('.actions');
+          acts.appendChild(orderButtons(()=>{
+            const nx=moveInList(sorted,idx,idx-1);reorderItems(d.collection.id,nx.map(x=>x.file_path));
+          },()=>{
+            const nx=moveInList(sorted,idx,idx+1);reorderItems(d.collection.id,nx.map(x=>x.file_path));
+          }));
+          enableDrop(card,(from)=>{if(from===idx)return;const nx=moveInList(sorted,from,idx);reorderItems(d.collection.id,nx.map(x=>x.file_path));});
+          g.appendChild(card);
+        });
+      }
+      return;
+    }
+    d.children.forEach((k,ki)=>{
+      const kd=document.createElement('div');kd.className='kid';kd.draggable=false;wrap.appendChild(kd);
+      const head=document.createElement('button');head.className='head';
+      const label=document.createElement('span');label.textContent=(k.collection.kind==='movie'?'Película · ':'Temporada · ')+k.collection.title;head.appendChild(label);
+      const n=document.createElement('span');n.className='n';n.textContent=k.items.length+(k.collection.kind==='movie'?' archivo(s)':' episodio(s)')+' — clic para '+(expandedKid===k.collection.id?'contraer':'desplegar');head.appendChild(n);
+      head.setAttribute('aria-expanded',expandedKid===k.collection.id?'true':'false');
+      head.onclick=()=>{expandedKid=expandedKid===k.collection.id?null:k.collection.id;renderTree();};
+      kd.appendChild(head);
+      if(expandedKid===k.collection.id){
+        const eps=document.createElement('div');eps.className='eps';kd.appendChild(eps);
+        const childPoster=posterOf(k.collection)||rootPoster;
+        if(k.collection.kind==='movie'&&k.items.length>=1){
+          const hint0=document.createElement('div');hint0.className='hint';hint0.textContent='Película: un solo archivo. Para cambiarlo, saca el actual y mueve otro.';eps.appendChild(hint0);
+        }
+        if(!k.items.length){const e=document.createElement('div');e.className='empty';e.textContent='Sin episodios — mueve archivos desde Biblioteca.';eps.appendChild(e);}
+        const sorted=k.items.slice().sort((a,b)=>((a.pos||0)-(b.pos||0))||String(a.title||'').localeCompare(String(b.title||''),undefined,{numeric:true}));
+        sorted.forEach((it,idx)=>{
+          const card=epCard(it,k.collection.id,childPoster);
+          card.draggable=true;card.dataset.idx=idx;
+          card.addEventListener('dragstart',(e)=>{e.dataTransfer.setData('text/plain',String(idx));card.classList.add('dragging');});
+          card.addEventListener('dragend',()=>card.classList.remove('dragging'));
+          const acts=card.querySelector('.actions');
+          acts.appendChild(orderButtons(()=>{
+            const nx=moveInList(sorted,idx,idx-1);reorderItems(k.collection.id,nx.map(x=>x.file_path));
+          },()=>{
+            const nx=moveInList(sorted,idx,idx+1);reorderItems(k.collection.id,nx.map(x=>x.file_path));
+          }));
+          enableDrop(card,(from)=>{if(from===idx)return;const nx=moveInList(sorted,from,idx);reorderItems(k.collection.id,nx.map(x=>x.file_path));});
+          eps.appendChild(card);
+        });
+        const kt=document.createElement('div');kt.className='ktools';kd.appendChild(kt);
+        const hint=document.createElement('span');hint.className='mini';hint.textContent='Arrastra las tarjetas para reordenar (se guarda). Para renombrar, cambiar imagen o borrar usa Editar → detalle completo.';kt.appendChild(hint);
+        const eb=document.createElement('button');eb.className='dim small';eb.textContent='Abrir en detalle';eb.onclick=()=>openCol(expandedRoot);kt.appendChild(eb);
+      }
+    });
+  }catch(e){wrap.innerHTML='<div class="empty">No se pudo desplegar: '+e.message+'</div>';}
+}
+let creatingCol=false;
+async function createCol(){if(creatingCol)return;const t=$('#newcoltitle').value.trim();if(!t){cerr('Escribe un título.');return;}creatingCol=true;try{const r=await fetch('/api/collections',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:$('#newcolkind').value,title:t})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));$('#newcoltitle').value='';DETAILCACHE={};cok('Colección creada');await loadCols();expandedRoot=j.id;renderCols();renderTree();openCol(j.id);}catch(e){cerr('No se pudo crear: '+e.message);}finally{creatingCol=false;}}
+let creatingChild=false;
+async function createChild(rootId,title,kind){if(creatingChild)return;if(!title.trim()){cerr('Escribe el nombre de la temporada o película.');return;}creatingChild=true;try{const r=await fetch('/api/collections/'+rootId+'/children',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind,title:title.trim()})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));cok('Sub-colección creada');DETAILCACHE={};await loadCols(true);openCol(rootId,true);if(expandedRoot)renderTree();}catch(e){cerr('No se pudo crear: '+e.message);}finally{creatingChild=false;}}
+async function openCol(id,keep){
+  curDetail=id;
+  const box=$('#detail');box.style.display='block';
+  try{
+    const r=await fetch('/api/collections/'+id);if(!r.ok)throw new Error('HTTP '+r.status);
+    const raw=await r.json();
+    DETAILCACHE[id]=raw;
+    const d=normDetail(raw);
+    const root=d.collection.parent_id?COLS.find(c=>c.id===d.collection.parent_id):null;
+    box.innerHTML='';
+    if(root){
+      const crumb=document.createElement('div');crumb.className='hint';crumb.style.marginBottom='8px';
+      const a=document.createElement('a');a.href='#';a.textContent='← '+root.title;a.style.color='var(--acc)';a.onclick=(ev)=>{ev.preventDefault();openCol(root.id);};
+      crumb.appendChild(a);box.appendChild(crumb);
+    }
+    const top=document.createElement('div');top.className='detail';box.appendChild(top);
+    const big=document.createElement('div');big.className='big';top.appendChild(big);
+    const pp=document.createElement('div');pp.className='poster';const u=posterOf(d.collection);
+    if(u){const im=document.createElement('img');im.src=u;pp.appendChild(im);}else pp.textContent=kindTag(d.collection);
+    big.appendChild(pp);
+    const ed=document.createElement('div');ed.style.flex='1';ed.style.minWidth='240px';top.appendChild(ed);
+    const h=document.createElement('h2');h.style.margin='0 0 8px';h.style.fontSize='16px';
+    h.textContent=d.collection.title+' · '+kindTag(d.collection)+' · '+(d.children.length?d.children.length+' sub-colección(es)':d.items.length+' episodio(s)');
+    ed.appendChild(h);
+    const row1=document.createElement('div');row1.className='row';ed.appendChild(row1);
+    const ti=document.createElement('input');ti.type='text';ti.value=d.collection.title;ti.setAttribute('aria-label','Título de la colección');row1.appendChild(ti);
+    const sb=document.createElement('button');sb.className='small ghost';sb.textContent='Guardar título';sb.onclick=()=>patchCol(id,{title:ti.value});row1.appendChild(sb);
+    const del=document.createElement('button');del.className='small danger';del.textContent=d.collection.parent_id?'Eliminar sub-colección':'Eliminar colección';del.onclick=()=>delCol(id,!!d.collection.parent_id);row1.appendChild(del);
+    if(!d.collection.parent_id&&d.collection.kind==='series'){
+      const rowk=document.createElement('div');rowk.className='row';ed.appendChild(rowk);
+      const ks=document.createElement('select');ks.innerHTML='<option value="season">Temporada</option><option value="movie">Película / Parte</option>';rowk.appendChild(ks);
+      const close=document.createElement('button');close.className='small dim';close.textContent='Cerrar detalle';close.onclick=()=>{box.style.display='none';curDetail=null;};rowk.appendChild(close);
+    }else{
+      const rowk=document.createElement('div');rowk.className='row';ed.appendChild(rowk);
+      const ks=document.createElement('select');
+      if(d.collection.parent_id)ks.innerHTML='<option value="season">Temporada</option><option value="movie">Película / Parte</option>';
+      else ks.innerHTML='<option value="series">Serie</option><option value="movie">Película</option>';
+      ks.value=d.collection.kind;rowk.appendChild(ks);
+      const kb=document.createElement('button');kb.className='small ghost';kb.textContent='Guardar tipo';kb.onclick=()=>patchCol(id,{kind:ks.value});rowk.appendChild(kb);
+      const close=document.createElement('button');close.className='small dim';close.textContent='Cerrar';close.onclick=()=>{box.style.display='none';curDetail=null;};rowk.appendChild(close);
+    }
+    const row2=document.createElement('div');row2.className='row';ed.appendChild(row2);
+    const pu=document.createElement('input');pu.type='text';pu.placeholder='URL de portada https://… (o sube abajo)';pu.value=d.collection.poster_url||'';pu.style.minWidth='220px';row2.appendChild(pu);
+    const ub=document.createElement('button');ub.className='small ghost';ub.textContent='Guardar URL';ub.onclick=()=>patchCol(id,{poster_url:pu.value});row2.appendChild(ub);
+    const row3=document.createElement('div');row3.className='row';ed.appendChild(row3);
+    const fi=document.createElement('input');fi.type='file';fi.accept='image/jpeg,image/png,image/webp';row3.appendChild(fi);
+    const fb=document.createElement('button');fb.className='small';fb.textContent='Subir portada';fb.onclick=()=>uploadPoster(id,fi);row3.appendChild(fb);
+    if(!d.collection.parent_id&&d.collection.kind==='series'){
+      const nc=document.createElement('div');nc.className='childbox';box.appendChild(nc);
+      const nh=document.createElement('h3');nh.textContent='Nueva sub-colección · Temporada / Película';nc.appendChild(nh);
+      const nr=document.createElement('div');nr.className='row';nc.appendChild(nr);
+      const ni=document.createElement('input');ni.type='text';ni.placeholder='Nombre — p.ej. Temporada 1, Película: El arco final';nr.appendChild(ni);
+      const nk=document.createElement('select');nk.innerHTML='<option value="season">Temporada</option><option value="movie">Película / Parte</option>';nr.appendChild(nk);
+      const nb=document.createElement('button');nb.className='small';nb.textContent='Crear';nb.onclick=()=>createChild(id,ni.value,nk.value);nr.appendChild(nb);
+    }
+    if(!d.collection.parent_id&&d.children.length){
+      const hint0=document.createElement('p');hint0.className='hint';hint0.textContent='Arrastra las cabeceras de temporada/película o usa ↑ ↓ para fijar el orden visual (se guarda en el servidor).';box.appendChild(hint0);
+      d.children.forEach((k,ki)=>{
+        const sh=document.createElement('div');sh.className='season';sh.draggable=true;sh.dataset.idx=ki;
+        sh.addEventListener('dragstart',(e)=>{e.dataTransfer.setData('text/plain',String(ki));sh.classList.add('dragging');});
+        sh.addEventListener('dragend',()=>sh.classList.remove('dragging'));
+        const st=document.createElement('span');st.textContent=(k.collection.kind==='movie'?'Película · ':'Temporada · ')+k.collection.title+' ('+k.items.length+(k.collection.kind==='movie'?' archivo)':' episodio(s))');sh.appendChild(st);
+        const ctl=document.createElement('span');ctl.className='ctl';sh.appendChild(ctl);
+        ctl.appendChild(orderButtons(()=>{
+          const nx=moveInList(d.children,ki,ki-1);reorderChildren(d.collection.id,nx.map(x=>x.collection.id));
+        },()=>{
+          const nx=moveInList(d.children,ki,ki+1);reorderChildren(d.collection.id,nx.map(x=>x.collection.id));
+        }));
+        const rn=document.createElement('button');rn.className='dim';rn.textContent='Renombrar';rn.onclick=()=>{const v=prompt('Nuevo nombre:',k.collection.title);if(v!==null)patchCol(k.collection.id,{title:v});};ctl.appendChild(rn);
+        const rm=document.createElement('button');rm.className='danger';rm.textContent='Quitar';rm.onclick=()=>delCol(k.collection.id,true);ctl.appendChild(rm);
+        box.appendChild(sh);
+        enableDrop(sh,(from)=>{if(from===ki)return;const nx=moveInList(d.children,from,ki);reorderChildren(d.collection.id,nx.map(x=>x.collection.id));});
+        const ku=document.createElement('div');ku.className='row';box.appendChild(ku);
+        const pui=document.createElement('input');pui.type='text';pui.placeholder='URL de imagen de la sub-colección…';pui.value=k.collection.poster_url||'';pui.style.minWidth='200px';ku.appendChild(pui);
+        const pub=document.createElement('button');pub.className='dim small';pub.textContent='Guardar imagen';pub.onclick=()=>patchCol(k.collection.id,{poster_url:pui.value});ku.appendChild(pub);
+        if(k.collection.kind==='movie'&&k.items.length>=1){const mh=document.createElement('div');mh.className='hint';mh.textContent='Película: un solo archivo. Para cambiarlo, saca el actual y mueve otro.';box.appendChild(mh);}
+        const g=document.createElement('div');g.className='grid';box.appendChild(g);
+        if(!k.items.length){const e=document.createElement('div');e.className='empty';e.textContent='Sin episodios — mueve archivos desde Biblioteca eligiendo "'+k.collection.title+'" como destino.';box.appendChild(e);}
+        const sorted=k.items.slice().sort((a,b)=>((a.pos||0)-(b.pos||0))||String(a.title||'').localeCompare(String(b.title||''),undefined,{numeric:true}));
+        const childPoster=posterOf(k.collection)||posterOf(d.collection);
+        sorted.forEach((it,idx)=>{
+          const card=epCard(it,k.collection.id,childPoster);
+          card.draggable=true;card.dataset.idx=idx;
+          card.addEventListener('dragstart',(e)=>{e.dataTransfer.setData('text/plain',String(idx));card.classList.add('dragging');});
+          card.addEventListener('dragend',()=>card.classList.remove('dragging'));
+          const acts=card.querySelector('.actions');
+          acts.appendChild(orderButtons(()=>{
+            const nx=moveInList(sorted,idx,idx-1);reorderItems(k.collection.id,nx.map(x=>x.file_path));
+          },()=>{
+            const nx=moveInList(sorted,idx,idx+1);reorderItems(k.collection.id,nx.map(x=>x.file_path));
+          }));
+          enableDrop(card,(from)=>{if(from===idx)return;const nx=moveInList(sorted,from,idx);reorderItems(k.collection.id,nx.map(x=>x.file_path));});
+          g.appendChild(card);
+        });
+      });
+    }else if(!d.collection.parent_id||!d.children.length){
+      // Hoja (película suelta o temporada): episodios directos.
+      const items=d.collection.parent_id?d.items:(d.children.length?[]:d.items);
+      if(!items.length&&!d.children.length){const e=document.createElement('div');e.className='empty';e.textContent='Vacía — mueve archivos desde Biblioteca o escanea con agrupación.';box.appendChild(e);}
+      if(d.collection.kind==='movie'&&items.length>=1){const mh=document.createElement('div');mh.className='hint';mh.textContent='Película: un solo archivo. Para cambiarlo, saca el actual y mueve otro.';box.appendChild(mh);}
+      if(items.length){
+        const sh=document.createElement('div');sh.className='season';sh.textContent=(d.collection.kind==='movie'?'Archivo · ':'Episodios · ')+items.length+' — arrastra o usa ↑ ↓ para ordenar';box.appendChild(sh);
+        const g=document.createElement('div');g.className='grid';box.appendChild(g);
+        const sorted=items.slice().sort((a,b)=>((a.pos||0)-(b.pos||0))||String(a.title||'').localeCompare(String(b.title||''),undefined,{numeric:true}));
+        const leafPoster=posterOf(d.collection)||(root?posterOf(root):'');
+        sorted.forEach((it,idx)=>{
+          const card=epCard(it,d.collection.id,leafPoster);
+          card.draggable=true;card.dataset.idx=idx;
+          card.addEventListener('dragstart',(e)=>{e.dataTransfer.setData('text/plain',String(idx));card.classList.add('dragging');});
+          card.addEventListener('dragend',()=>card.classList.remove('dragging'));
+          const acts=card.querySelector('.actions');
+          acts.appendChild(orderButtons(()=>{
+            const nx=moveInList(sorted,idx,idx-1);reorderItems(d.collection.id,nx.map(x=>x.file_path));
+          },()=>{
+            const nx=moveInList(sorted,idx,idx+1);reorderItems(d.collection.id,nx.map(x=>x.file_path));
+          }));
+          enableDrop(card,(from)=>{if(from===idx)return;const nx=moveInList(sorted,from,idx);reorderItems(d.collection.id,nx.map(x=>x.file_path));});
+          g.appendChild(card);
+        });
+      }
+    }
+    if(!keep)box.scrollIntoView({behavior:'smooth'});
+  }catch(e){cerr('No se pudo abrir: '+e.message);}
+}
+async function patchCol(id,body){try{const r=await fetch('/api/collections/'+id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));cok('Guardado');DETAILCACHE={};await loadCols(true);openCol(id,true);if(expandedRoot)renderTree();}catch(e){cerr('No se pudo guardar: '+e.message);}}
+async function delCol(id,isChild){if(!confirm(isChild?'¿Quitar esta sub-colección? Sus episodios vuelven a quedar solo en Biblioteca.':'¿Eliminar la colección y sus sub-colecciones? Los archivos quedan en Biblioteca.'))return;try{const r=await fetch('/api/collections/'+id,{method:'DELETE'});if(!r.ok)throw new Error('HTTP '+r.status);DETAILCACHE={};if(curDetail===id){$('#detail').style.display='none';curDetail=null;}if(expandedRoot===id)expandedRoot=null;cok('Eliminada');await loadCols();}catch(e){cerr('No se pudo eliminar: '+e.message);}}
+async function unlink(cid,path){try{const r=await fetch('/api/collections/'+cid+'/items?path='+encodeURIComponent(path),{method:'DELETE'});if(!r.ok)throw new Error('HTTP '+r.status);DETAILCACHE={};openCol(curDetail||cid,true);await loadCols(true);if(expandedRoot)renderTree();}catch(e){cerr('No se pudo sacar: '+e.message);}}
+async function uploadPoster(id,inp){if(!inp.files.length){cerr('Elige una imagen.');return;}const fd=new FormData();fd.append('poster',inp.files[0]);try{const r=await fetch('/api/collections/'+id+'/poster',{method:'POST',body:fd});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));cok('Portada subida');DETAILCACHE={};await loadCols(true);openCol(id,true);if(expandedRoot)renderTree();}catch(e){cerr('No se pudo subir: '+e.message);}}
+/* ---- Añadir ---- */
+async function addFile(){aclear();const p=$('#filepath').value.trim();if(!p){aerr('Escribe la ruta del archivo en el servidor.');return;}$('#btn-add').disabled=true;try{const r=await fetch('/api/library/add-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));aok('Añadido: '+j.path+' ('+fmt(j.size)+')');$('#filepath').value='';refresh();}catch(e){aerr('No se pudo añadir: '+e.message);}finally{$('#btn-add').disabled=false;}}
+async function scanFolder(){aclear();const p=$('#folderpath').value.trim();if(!p){aerr('Escribe la ruta de la carpeta en el servidor.');return;}$('#btn-scan').disabled=true;$('#jobbox').style.display='none';try{const r=await fetch('/api/library/scan-folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p,recursive:$('#recursive').checked,collection_title:$('#scan-col').value.trim(),collection_kind:$('#scan-kind').value,season:$('#scan-season').value.trim()})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));if(j.found===0){aok('Carpeta vacía: no hay vídeos.');return;}if(j.collection_id){aok('Escaneando y agrupando en la colección…');}$('#jobbox').style.display='block';pollJob(j.job_id);}catch(e){aerr('No se pudo escanear: '+e.message);$('#btn-scan').disabled=false;}}
+async function pollJob(id){try{const r=await fetch('/api/library/jobs/'+id);const j=await r.json();const pct=j.total?Math.round(j.done/j.total*100):100;$('#jobbar').value=pct;$('#jobtxt').textContent=j.done+'/'+j.total+' · '+j.status;$('#joblog').textContent=(j.errors||[]).join('\n');if(j.status==='running'){setTimeout(()=>pollJob(id),1000);return;}const ok=(j.added||[]).length;aok('Escaneo '+j.status+': '+ok+' añadido(s)'+(j.errors.length?' · '+j.errors.length+' con error (ver detalle)':''));DETAILCACHE={};refresh();}catch(e){aerr('Sin estado del escaneo: '+e.message);}finally{if($('#jobtxt').textContent.indexOf('running')<0)$('#btn-scan').disabled=false;}}
+async function uploadFiles(){aclear();const inp=$('#fileinput');if(!inp.files.length){aerr('Elige al menos un archivo con el selector.');return;}$('#btn-upload').disabled=true;$('#upbox').style.display='block';let ok=0;const errs=[];for(let i=0;i<inp.files.length;i++){const f=inp.files[i];$('#uptxt').textContent=(i+1)+'/'+inp.files.length+' · '+f.name;$('#upbar').value=Math.round(i/inp.files.length*100);const fd=new FormData();fd.append('file',f,f.name);try{const r=await fetch('/api/library/upload',{method:'POST',body:fd});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));ok++;}catch(e){errs.push(f.name+': '+e.message);}}$('#upbar').value=100;$('#uptxt').textContent=inp.files.length+'/'+inp.files.length;inp.value='';if(errs.length)aerr('Subidos '+ok+' de '+inp.files.length+'. Errores: '+errs.join(' | '));else aok('Subido(s): '+ok+' archivo(s) en la lista.');refresh();$('#btn-upload').disabled=false;}
+/* ---- Player híbrido: web + VLC siempre ---- */
+function play(f){cur=f;clear();const v=$('#v');$('#overlay').classList.add('open');$('#mtitle').textContent=disp(f);$('#mvlc').href=vlcIntent(f);const mkv=isMkv(f);$('#mnote').textContent=mkv?'MKV: si la web no lo abre, usa VLC (botón siempre disponible).':'MP4/WebM: reproducción nativa.';v.src='/stream/'+f.hash;v.play().catch(()=>{});}
+function closePlayer(){const v=$('#v');v.pause();v.removeAttribute('src');v.load();$('#overlay').classList.remove('open');cur=null;}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closePlayer();});
+$('#v').addEventListener('error',()=>{const v=$('#v');err('Error de reproducción (código '+(v.error?v.error.code:'?')+'). Prueba Abrir en VLC — la URL es la misma.');});
+$('#reload').onclick=()=>refresh();
 if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(()=>{});}
-info();files();
+refresh();
 </script>
 </body>
 </html>
