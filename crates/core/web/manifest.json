@@ -1,0 +1,9 @@
+{
+  "name": "p2p-nube · Baúl",
+  "short_name": "Baúl",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#111318",
+  "theme_color": "#111318",
+  "description": "Nube P2P privada: streaming sin descarga"
+}

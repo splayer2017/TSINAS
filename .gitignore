@@ -1,0 +1,7 @@
+/data-nodo/
+/target
+Cargo.lock
+*.sqlite3*
+blobs/
+docs/
+*.mkv

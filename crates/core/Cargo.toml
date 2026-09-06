@@ -1,0 +1,30 @@
+[package]
+name = "p2p-nube-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+rusqlite.workspace = true
+axum.workspace = true
+axum-server.workspace = true
+tower-http.workspace = true
+bytes.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rustls.workspace = true
+
+iroh.workspace = true
+iroh-blobs.workspace = true
+iroh-docs.workspace = true
+iroh-gossip.workspace = true
+tokio-util = { version = "0.7", features = ["io"] }
+
+[dev-dependencies]
+tempfile = "3"
+reqwest = "0.12"
+rcgen = "0.14"
