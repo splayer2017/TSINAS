@@ -16,21 +16,20 @@ async fn dos_nodos_sincronizan_biblioteca() -> anyhow::Result<()> {
     let a = Node::spawn(dir_a.path().to_path_buf()).await?;
     let b = Node::spawn(dir_b.path().to_path_buf()).await?;
 
-    // A crea biblioteca y comparte ticket (simula "marcar carpeta para transmitir").
+    // A crea biblioteca y comparte ticket (ShareMode::Read por defecto para viewers).
     let author_a = a.docs.author_default().await?;
     let doc_a = a.docs.create().await?;
     let ticket_s = doc_a
-        .share(ShareMode::Write, AddrInfoOptions::RelayAndAddresses)
+        .share(ShareMode::Read, AddrInfoOptions::RelayAndAddresses)
         .await?
         .to_string();
     assert!(!ticket_s.is_empty());
 
-    // B importa el ticket (como hará el móvil).
+    // B importa el ticket en modo StreamOnly (no descarga automáticamente los blobs).
     let ticket = iroh_docs::DocTicket::from_str(&ticket_s)?;
-    let doc_b = b.docs.import(ticket).await?;
+    let doc_b = b.import_library_stream_only(ticket).await?;
 
-    // A publica una entrada StreamOnly (hash ficticio pequeño vía set_bytes,
-    // que además guarda el contenido como blob y se sincroniza por defecto).
+    // A publica una entrada StreamOnly.
     let key = "anime/cap01.mkv";
     let value = br#"{"policy":"stream_only","note":"solo metadato+contenido sync"}"#;
     let hash_a = doc_a
@@ -54,13 +53,9 @@ async fn dos_nodos_sincronizan_biblioteca() -> anyhow::Result<()> {
     assert_eq!(entry.content_hash(), hash_a);
     assert_eq!(entry.content_len() as usize, value.len());
 
-    // El contenido también debe haberse sincronizado (DownloadPolicy por defecto = todo).
-    let bytes = b
-        .blobs_store
-        .blobs()
-        .get_bytes(entry.content_hash())
-        .await?;
-    assert_eq!(&bytes[..], &value[..]);
+    // StreamOnly: El contenido NO se descarga automáticamente a disco en B.
+    let has_blob = b.blobs_store.blobs().has(entry.content_hash()).await?;
+    assert!(!has_blob, "StreamOnly: B no debe haber descargado el blob");
 
     a.endpoint.close().await;
     b.endpoint.close().await;

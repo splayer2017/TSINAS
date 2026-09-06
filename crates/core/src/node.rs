@@ -1,11 +1,12 @@
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use iroh::{endpoint::presets, protocol::Router, Endpoint};
 use iroh_blobs::{api::Store as BlobsStore, BlobsProtocol};
 use iroh_docs::api::protocol::{AddrInfoOptions, ShareMode};
 use iroh_docs::protocol::Docs;
-use iroh_gossip::{net::Gossip, proto::TopicId};
-use sha2::{Digest, Sha256};
+use iroh_docs::store::DownloadPolicy;
+use iroh_gossip::net::Gossip;
 
 use crate::db::Db;
 
@@ -77,24 +78,57 @@ impl Node {
         self.endpoint.id().to_string()
     }
 
-    /// Crea un Doc nuevo (una "biblioteca", p.ej. el baúl) y devuelve su ticket.
+    /// Obtiene o crea la biblioteca activa persistida en la DB local.
+    /// Emite ticket con `ShareMode::Read` por defecto para proteger el catálogo (HIGH-07).
+    pub async fn get_or_create_library(
+        &self,
+    ) -> anyhow::Result<(iroh_docs::api::Doc, iroh_docs::AuthorId, String)> {
+        let author = self.docs.author_default().await?;
+        let doc = if let Some(id_s) = self.db.get_setting("active_doc_id")? {
+            if let Ok(id) = iroh_docs::NamespaceId::from_str(&id_s) {
+                if let Ok(Some(existing)) = self.docs.open(id).await {
+                    existing
+                } else {
+                    let d = self.docs.create().await?;
+                    self.db.set_setting("active_doc_id", &d.id().to_string())?;
+                    d
+                }
+            } else {
+                let d = self.docs.create().await?;
+                self.db.set_setting("active_doc_id", &d.id().to_string())?;
+                d
+            }
+        } else {
+            let d = self.docs.create().await?;
+            self.db.set_setting("active_doc_id", &d.id().to_string())?;
+            d
+        };
+
+        let ticket = doc
+            .share(ShareMode::Read, AddrInfoOptions::RelayAndAddresses)
+            .await?;
+        Ok((doc, author, ticket.to_string()))
+    }
+
+    /// Importa una biblioteca externa configurando la política de descarga en `NothingExcept`
+    /// para modo StreamOnly (no satura disco ni memoria descargando los blobs asociados).
+    pub async fn import_library_stream_only(
+        &self,
+        ticket: iroh_docs::DocTicket,
+    ) -> anyhow::Result<iroh_docs::api::Doc> {
+        let doc = self.docs.import(ticket).await?;
+        doc.set_download_policy(DownloadPolicy::NothingExcept(vec![]))
+            .await?;
+        Ok(doc)
+    }
+
+    /// Crea un Doc nuevo (una "biblioteca", p.ej. el baúl) y devuelve su ticket con ShareMode::Read.
     pub async fn create_library(&self) -> anyhow::Result<String> {
         let doc = self.docs.create().await?;
         let ticket = doc
-            .share(ShareMode::Write, AddrInfoOptions::RelayAndAddresses)
+            .share(ShareMode::Read, AddrInfoOptions::RelayAndAddresses)
             .await?;
         Ok(ticket.to_string())
-    }
-
-    /// Topic de gossip determinista por biblioteca (para presencia/live-sync).
-    pub fn topic_for(library: &str) -> TopicId {
-        let mut h = Sha256::new();
-        h.update(b"p2p-nube/v1/");
-        h.update(library.as_bytes());
-        let digest = h.finalize();
-        let mut bytes = [0u8; 32];
-        bytes.copy_from_slice(&digest[..32]);
-        TopicId::from_bytes(bytes)
     }
 }
 

@@ -31,6 +31,8 @@ li{background:var(--card);border:1px solid var(--line);border-radius:12px;paddin
 li .t{font-weight:600;font-size:15px;word-break:break-all}
 li .m{font-size:12px;color:var(--mut);margin:4px 0 8px}
 .badge{display:inline-block;font-size:11px;padding:2px 8px;border-radius:20px;background:#333c52;margin-left:6px}
+.badge-zc{background:#123824;color:#4ade80;border:1px solid #2e7d4f}
+.badge-copy{background:#3a1d22;color:#f87171;border:1px solid var(--bad)}
 .err{background:#3a1d22;border:1px solid var(--bad);border-radius:10px;padding:10px;display:none;margin:8px 0;font-size:14px}
 .ok{background:#12291c;border:1px solid var(--ok);border-radius:10px;padding:10px;display:none;margin:8px 0;font-size:14px}
 .hint{font-size:12px;color:var(--mut)}
@@ -72,29 +74,11 @@ progress{width:100%;height:10px}
 <section id="view-add" class="view">
 <div class="err" id="adderr"></div>
 <div class="ok" id="addok"></div>
+
 <div class="card">
-<h2>Subir desde este dispositivo</h2>
+<h2>Escanear carpeta del host <span class="badge badge-zc">Zero-Copy</span></h2>
 <div class="row">
-<input type="file" id="fileinput" accept="video/*,.mkv,.mp4,.webm,.avi" multiple>
-<button id="btn-upload" onclick="uploadFiles()">Subir</button>
-</div>
-<div id="upbox" style="display:none">
-<div class="row"><progress id="upbar" max="100" value="0"></progress><span class="hint" id="uptxt"></span></div>
-</div>
-<p class="hint">Funciona desde el PC y desde el móvil: el archivo se envía al servidor y queda en la lista (tope 8 GiB por archivo).</p>
-</div>
-<div class="card">
-<h2>Añadir archivo por ruta del servidor</h2>
-<div class="row">
-<input type="text" id="filepath" placeholder="/home/uriel/Videos/cap07.mkv" autocomplete="off" spellcheck="false">
-<button id="btn-add" onclick="addFile()">Añadir</button>
-</div>
-<p class="hint">La ruta es del PC que hospeda, no de este navegador.</p>
-</div>
-<div class="card">
-<h2>Escanear carpeta (lista los MKV solos)</h2>
-<div class="row">
-<input type="text" id="folderpath" placeholder="/home/uriel/Anime/Temporada1" autocomplete="off" spellcheck="false">
+<input type="text" id="folderpath" placeholder="/home/uriel/mnt/Storage/Anime/Temporada1" autocomplete="off" spellcheck="false">
 <label class="check"><input type="checkbox" id="recursive"> subcarpetas</label>
 <button id="btn-scan" onclick="scanFolder()">Escanear</button>
 </div>
@@ -102,6 +86,28 @@ progress{width:100%;height:10px}
 <div class="row"><progress id="jobbar" max="100" value="0"></progress><span class="hint" id="jobtxt"></span></div>
 <div id="joblog"></div>
 </div>
+<p class="hint">⚡ <strong>Cero copias:</strong> Indexa carpetas de tu disco local o secundario sin mover ni duplicar archivos. El streaming lee directamente desde la ubicación original.</p>
+</div>
+
+<div class="card">
+<h2>Añadir archivo por ruta <span class="badge badge-zc">Zero-Copy</span></h2>
+<div class="row">
+<input type="text" id="filepath" placeholder="/home/uriel/mnt/Storage/Videos/cap01.mkv" autocomplete="off" spellcheck="false">
+<button id="btn-add" onclick="addFile()">Añadir</button>
+</div>
+<p class="hint">⚡ Referencia directa a la ruta del archivo en el servidor. No consume espacio adicional.</p>
+</div>
+
+<div class="card">
+<h2>Subir desde este dispositivo <span class="badge badge-copy">Copia al host</span></h2>
+<div class="row">
+<input type="file" id="fileinput" accept="video/*,.mkv,.mp4,.webm,.avi" multiple>
+<button id="btn-upload" onclick="uploadFiles()">Subir</button>
+</div>
+<div id="upbox" style="display:none">
+<div class="row"><progress id="upbar" max="100" value="0"></progress><span class="hint" id="uptxt"></span></div>
+</div>
+<p class="hint">⚠️ <strong>Solo para subir archivos desde el móvil u otro equipo al host.</strong> Si estás en el PC anfitrión, usa "Escanear carpeta" arriba para no duplicar gigabytes en tu SSD (tope 8 GiB por archivo).</p>
 </div>
 </section>
 </main>

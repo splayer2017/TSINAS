@@ -14,7 +14,7 @@ use axum::{
 use iroh_blobs::{api::Store as BlobsStore, Hash};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 
 use crate::db::Db;
@@ -28,6 +28,7 @@ pub struct Gateway {
     pub endpoint_id: String,
     pub library: Arc<Library>,
     pub jobs: Jobs,
+    pub mime_cache: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
 }
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
@@ -47,29 +48,40 @@ impl Gateway {
         endpoint_id: String,
         media_roots: Vec<PathBuf>,
     ) -> Router {
-        let library = Arc::new(
-            Library::new(store.clone(), db.clone(), endpoint_id.clone())
-                .with_media_roots(media_roots),
-        );
+        let library = Arc::new(Library::new(store, db, endpoint_id).with_media_roots(media_roots));
+        Self::router_with_library(library)
+    }
+
+    /// Router a partir de una instancia de Library configurada.
+    pub fn router_with_library(library: Arc<Library>) -> Router {
         let state = Arc::new(Gateway {
-            store,
-            db,
-            endpoint_id,
+            store: library.store().clone(),
+            db: library.db().clone(),
+            endpoint_id: library.endpoint_id().to_string(),
             library,
             jobs: Jobs::default(),
+            mime_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
         });
+
+        // Capa de timeout de 30s en endpoints de API para protección slowloris
+        let api_routes = Router::new()
+            .route("/files", get(api_files))
+            .route("/info", get(api_info))
+            .route("/library/add-file", post(api_add_file))
+            .route("/library/scan-folder", post(api_scan_folder))
+            .route("/library/jobs/:id", get(api_job))
+            .route("/files/:hash", delete(api_remove_file))
+            .layer(tower_http::timeout::TimeoutLayer::new(
+                std::time::Duration::from_secs(30),
+            ));
+
         Router::new()
             .route("/", get(index))
             .route("/manifest.json", get(manifest))
             .route("/sw.js", get(sw))
             .route("/health", get(health))
-            .route("/api/files", get(api_files))
-            .route("/api/info", get(api_info))
-            .route("/api/library/add-file", post(api_add_file))
-            .route("/api/library/scan-folder", post(api_scan_folder))
+            .nest("/api", api_routes)
             .route("/api/library/upload", post(api_upload))
-            .route("/api/library/jobs/:id", get(api_job))
-            .route("/api/files/:hash", delete(api_remove_file))
             .route("/stream/:hash", get(stream).head(stream_head))
             // Sin límite global de 2 MB: la subida de vídeos lo necesita.
             // `api_upload` impone su propio tope (8 GiB) mientras escribe.
@@ -93,9 +105,16 @@ impl Gateway {
         endpoint_id: String,
         media_roots: Vec<PathBuf>,
     ) -> anyhow::Result<(String, tokio::task::JoinHandle<()>)> {
+        let library = Arc::new(Library::new(store, db, endpoint_id).with_media_roots(media_roots));
+        Self::serve_loopback_with_library(library).await
+    }
+
+    pub async fn serve_loopback_with_library(
+        library: Arc<Library>,
+    ) -> anyhow::Result<(String, tokio::task::JoinHandle<()>)> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let addr: SocketAddr = listener.local_addr()?;
-        let app = Self::router_with_media_roots(store, db, endpoint_id, media_roots);
+        let app = Self::router_with_library(library);
         let handle = tokio::spawn(async move {
             let _ = axum::serve(
                 listener,
@@ -130,6 +149,16 @@ impl Gateway {
         key: &std::path::Path,
         media_roots: Vec<PathBuf>,
     ) -> anyhow::Result<(tokio::task::JoinHandle<()>, SocketAddr)> {
+        let library = Arc::new(Library::new(store, db, endpoint_id).with_media_roots(media_roots));
+        Self::serve_tls_with_library(library, addr, cert, key).await
+    }
+
+    pub async fn serve_tls_with_library(
+        library: Arc<Library>,
+        addr: SocketAddr,
+        cert: &std::path::Path,
+        key: &std::path::Path,
+    ) -> anyhow::Result<(tokio::task::JoinHandle<()>, SocketAddr)> {
         // rustls no elige proveedor solo si conviven ring (iroh) y aws-lc-rs
         // (axum-server): fijamos ring explícitamente (idempotente).
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -144,7 +173,7 @@ impl Gateway {
             anyhow::anyhow!("no se pudo bindear {addr}: {e} (¿puerto ocupado por otra instancia?)")
         })?;
         let bound: SocketAddr = listener.local_addr()?;
-        let app = Self::router_with_media_roots(store, db, endpoint_id, media_roots);
+        let app = Self::router_with_library(library);
         let handle = tokio::spawn(async move {
             if let Err(e) = axum_server::from_tcp_rustls(listener, config)
                 .serve(app.into_make_service_with_connect_info::<SocketAddr>())
@@ -204,30 +233,48 @@ async fn api_add_file(
 }
 
 /// POST /api/library/scan-folder {path, recursive} — escanea una carpeta
-/// del servidor. Lista candidatos de forma síncrona y hashea en background;
-/// devuelve `{job_id, found}` al instante para que la UI muestre progreso.
+/// del servidor en segundo plano fuera de los hilos de Tokio (HIGH-03).
 async fn api_scan_folder(
     State(state): State<Arc<Gateway>>,
     Json(req): Json<ScanFolderReq>,
 ) -> impl IntoResponse {
-    let candidates = match state.library.scan_candidates(&req.path, req.recursive) {
-        Ok(c) => c,
-        Err(e) => {
+    let lib = state.library.clone();
+    let path = req.path.clone();
+    let recursive = req.recursive;
+
+    // HIGH-03: Despachar el recorrido síncrono del filesystem a un hilo bloqueante
+    let res = tokio::task::spawn_blocking(move || {
+        let candidates = lib.scan_candidates(&path, recursive)?;
+        let base = std::fs::canonicalize(&path)
+            .ok()
+            .map(|p| display_base_for(&p))
+            .unwrap_or_default();
+        let paths: Vec<String> = candidates
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        Ok::<_, anyhow::Error>((base, paths))
+    })
+    .await;
+
+    let (base, paths) = match res {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": e.to_string()})),
             )
                 .into_response();
         }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("error en tarea de escaneo: {e}")})),
+            )
+                .into_response();
+        }
     };
-    let base = std::fs::canonicalize(&req.path)
-        .ok()
-        .map(|p| display_base_for(&p))
-        .unwrap_or_default();
-    let paths: Vec<String> = candidates
-        .iter()
-        .map(|p| p.to_string_lossy().to_string())
-        .collect();
+
     let job_id = state.jobs.create(paths.len());
     if !paths.is_empty() {
         let lib = state.library.clone();
@@ -260,23 +307,22 @@ async fn api_scan_folder(
 }
 
 /// POST /api/library/upload (multipart, campo `file`) — subida directa
-/// desde el navegador o el móvil. El servidor escribe la subida a un
-/// temporal propio y la importa al blob store con el nombre original.
-/// Tope de 8 GiB por archivo; sin roles (ver nota del módulo).
+/// desde el navegador o el móvil.
+/// BLOCK-03: Utiliza staging en directorio persistente con guardia RAII TempStagedFile.
 async fn api_upload(
     State(state): State<Arc<Gateway>>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
     const MAX_UPLOAD: u64 = 8 * 1024 * 1024 * 1024;
-    let staging_dir = std::env::temp_dir().join("p2p-nube-uploads");
-    if let Err(e) = std::fs::create_dir_all(&staging_dir) {
+    let staging_dir = state.library.staging_dir();
+    if let Err(e) = tokio::fs::create_dir_all(staging_dir).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": format!("no se pudo preparar la subida: {e}")})),
         )
             .into_response();
     }
-    while let Ok(Some(field)) = multipart.next_field().await {
+    while let Ok(Some(mut field)) = multipart.next_field().await {
         let name = field
             .file_name()
             .map(|s| s.to_string())
@@ -284,28 +330,22 @@ async fn api_upload(
         if field.name() != Some("file") {
             continue;
         }
-        // Nombre único dentro del temporal (evita colisiones entre subidas).
-        let mut staged = staging_dir.join(
-            PathBuf::from(&name)
-                .file_name()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "archivo".into()),
-        );
-        for i in 1..1000 {
-            if !staged.exists() {
-                break;
-            }
-            let stem = staged
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| "archivo".into());
-            let ext = staged
-                .extension()
-                .map(|s| format!(".{}", s.to_string_lossy()))
-                .unwrap_or_default();
-            staged = staging_dir.join(format!("{stem}-{i}{ext}"));
-        }
-        let mut out = match tokio::fs::File::create(&staged).await {
+
+        // Nombre único con timestamp + contador atómico para evitar colisiones
+        static UPLOAD_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let count = UPLOAD_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let safe_name = PathBuf::from(&name)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "archivo".into());
+        let staged_path = staging_dir.join(format!("{}-{}-{}", now, count, safe_name));
+        let staged = crate::library::TempStagedFile::new(staged_path);
+
+        let mut out = match tokio::fs::File::create(staged.path()).await {
             Ok(f) => f,
             Err(e) => {
                 return (
@@ -316,13 +356,12 @@ async fn api_upload(
             }
         };
         let mut written: u64 = 0;
-        let mut field = field;
         loop {
             match field.chunk().await {
                 Ok(Some(chunk)) => {
                     written += chunk.len() as u64;
                     if written > MAX_UPLOAD {
-                        let _ = tokio::fs::remove_file(&staged).await;
+                        // staged se elimina automáticamente al salir del scope por Drop
                         return (
                             StatusCode::PAYLOAD_TOO_LARGE,
                             Json(json!({"error": "archivo demasiado grande (tope 8 GiB)"})),
@@ -331,7 +370,6 @@ async fn api_upload(
                     }
                     use tokio::io::AsyncWriteExt;
                     if let Err(e) = out.write_all(&chunk).await {
-                        let _ = tokio::fs::remove_file(&staged).await;
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(json!({"error": format!("error al guardar la subida: {e}")})),
@@ -341,7 +379,6 @@ async fn api_upload(
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    let _ = tokio::fs::remove_file(&staged).await;
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(json!({"error": format!("subida interrumpida: {e}")})),
@@ -350,9 +387,11 @@ async fn api_upload(
                 }
             }
         }
+        let _ = out.flush().await;
         drop(out);
-        match state.library.add_upload(&name, &staged).await {
+        match state.library.add_upload(&name, staged.path()).await {
             Ok(a) => {
+                staged.commit();
                 return (
                     StatusCode::OK,
                     Json(json!({"path": a.path, "hash": a.hash, "size": a.size, "mime": a.mime})),
@@ -360,7 +399,6 @@ async fn api_upload(
                     .into_response();
             }
             Err(e) => {
-                let _ = std::fs::remove_file(&staged);
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({"error": e.to_string()})),
@@ -452,22 +490,7 @@ async fn sw() -> impl IntoResponse {
 /// Lista de archivos marcados para transmitir (proyección SQLite local).
 async fn api_files(State(state): State<Arc<Gateway>>) -> impl IntoResponse {
     match state.db.list_files() {
-        Ok(rows) => {
-            let arr: Vec<_> = rows
-                .iter()
-                .map(|r| {
-                    json!({
-                        "path": r.path,
-                        "hash": r.hash,
-                        "size": r.size,
-                        "mime": r.mime,
-                        "policy": r.policy.as_str(),
-                        "host_id": r.host_id,
-                    })
-                })
-                .collect();
-            (StatusCode::OK, Json(json!(arr))).into_response()
-        }
+        Ok(rows) => (StatusCode::OK, Json(rows)).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")).into_response(),
     }
 }
@@ -485,12 +508,21 @@ async fn api_info(State(state): State<Arc<Gateway>>) -> impl IntoResponse {
         .into_response()
 }
 
-/// MIME registrado en la DB para un hash, o `application/octet-stream`.
+/// MIME registrado en la DB para un hash, con caché en RAM (HIGH-02).
 fn mime_for(state: &Gateway, hash_s: &str) -> String {
-    match state.db.get_by_hash(hash_s) {
+    if let Ok(cache) = state.mime_cache.read() {
+        if let Some(m) = cache.get(hash_s) {
+            return m.clone();
+        }
+    }
+    let mime = match state.db.get_by_hash(hash_s) {
         Ok(Some(row)) if !row.mime.is_empty() => row.mime,
         _ => "application/octet-stream".to_string(),
+    };
+    if let Ok(mut cache) = state.mime_cache.write() {
+        cache.insert(hash_s.to_string(), mime.clone());
     }
+    mime
 }
 
 /// HEAD /stream/<hash>: mismos headers que GET pero sin body.
@@ -505,7 +537,7 @@ async fn stream_head(
             return (StatusCode::BAD_REQUEST, "hash inválido").into_response();
         }
     };
-    if state.store.blobs().has(hash).await.unwrap_or(false) == false {
+    if !state.store.blobs().has(hash).await.unwrap_or(false) {
         return (StatusCode::NOT_FOUND, "blob no disponible en este nodo").into_response();
     }
     let total = match state.store.blobs().status(hash).await {
@@ -544,7 +576,7 @@ async fn stream(
             return (StatusCode::BAD_REQUEST, "hash inválido").into_response();
         }
     };
-    if state.store.blobs().has(hash).await.unwrap_or(false) == false {
+    if !state.store.blobs().has(hash).await.unwrap_or(false) {
         return (StatusCode::NOT_FOUND, "blob no disponible en este nodo").into_response();
     }
 
@@ -562,7 +594,7 @@ async fn stream(
 
     let (start, end) = match parse_range(headers.get(header::RANGE), total) {
         Ok(r) => r,
-        Err(resp) => return resp,
+        Err(err) => return err.into_response(),
     };
     let len = end - start + 1;
 
@@ -570,7 +602,7 @@ async fn stream(
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("seek: {e}")).into_response();
     }
     let limited = reader.take(len);
-    let stream = ReaderStream::new(limited);
+    let stream = ReaderStream::with_capacity(limited, 64 * 1024);
     let body = Body::from_stream(stream);
 
     let mut resp_headers = HeaderMap::new();
@@ -595,48 +627,64 @@ async fn stream(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum RangeError {
+    NoContent,
+    Invalid,
+    OutOfBounds(u64),
+}
+
+impl IntoResponse for RangeError {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Self::NoContent => (StatusCode::NO_CONTENT, "vacío").into_response(),
+            Self::Invalid => (StatusCode::RANGE_NOT_SATISFIABLE, "rango inválido").into_response(),
+            Self::OutOfBounds(total) => (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [(
+                    header::CONTENT_RANGE.to_string(),
+                    format!("bytes */{total}"),
+                )],
+                "rango fuera de límites",
+            )
+                .into_response(),
+        }
+    }
+}
+
 /// Devuelve (start, end_inclusive). Sin Range => (0, total-1).
-fn parse_range(
+pub fn parse_range(
     header_val: Option<&axum::http::HeaderValue>,
     total: u64,
-) -> Result<(u64, u64), axum::response::Response> {
+) -> Result<(u64, u64), RangeError> {
     if total == 0 {
-        return Err((StatusCode::NO_CONTENT, "vacío").into_response());
+        return Err(RangeError::NoContent);
     }
     let Some(v) = header_val else {
         return Ok((0, total - 1));
     };
-    let s = v.to_str().unwrap_or("");
+    let s = v.to_str().map_err(|_| RangeError::Invalid)?;
     // Solo soportamos un rango simple: bytes=start-end / bytes=start- / bytes=-suffix
-    let s = s.strip_prefix("bytes=").unwrap_or("");
-    let (a, b) = s.split_once('-').unwrap_or(("", ""));
-    let start: u64 = if a.is_empty() {
-        // suffix: últimos N bytes
-        let suffix: u64 = b.parse().unwrap_or(0);
+    let s = s.strip_prefix("bytes=").ok_or(RangeError::Invalid)?;
+    let (a, b) = s.split_once('-').ok_or(RangeError::Invalid)?;
+    let (start, end) = if a.is_empty() {
+        // suffix: últimos N bytes (bytes=-N)
+        let suffix: u64 = b.parse().map_err(|_| RangeError::Invalid)?;
         if suffix == 0 {
             return Ok((0, total - 1));
         }
-        total.saturating_sub(suffix)
+        (total.saturating_sub(suffix), total - 1)
     } else {
-        a.parse()
-            .map_err(|_| (StatusCode::RANGE_NOT_SATISFIABLE, "rango inválido").into_response())?
-    };
-    let end: u64 = if b.is_empty() {
-        total - 1
-    } else {
-        b.parse()
-            .map_err(|_| (StatusCode::RANGE_NOT_SATISFIABLE, "rango inválido").into_response())?
+        let start: u64 = a.parse().map_err(|_| RangeError::Invalid)?;
+        let end: u64 = if b.is_empty() {
+            total - 1
+        } else {
+            b.parse().map_err(|_| RangeError::Invalid)?
+        };
+        (start, end)
     };
     if start >= total || end >= total || start > end {
-        return Err((
-            StatusCode::RANGE_NOT_SATISFIABLE,
-            [(
-                header::CONTENT_RANGE.to_string(),
-                format!("bytes */{total}"),
-            )],
-            "rango fuera de límites",
-        )
-            .into_response());
+        return Err(RangeError::OutOfBounds(total));
     }
     Ok((start, end))
 }
@@ -1027,8 +1075,10 @@ mod tests {
             .body(body)
             .send()
             .await?;
-        assert_eq!(r.status(), 200);
-        let v: serde_json::Value = serde_json::from_str(&r.text().await?)?;
+        let status = r.status();
+        let text = r.text().await?;
+        assert_eq!(status, 200, "Upload failed: {text}");
+        let v: serde_json::Value = serde_json::from_str(&text)?;
         assert_eq!(v["path"], "subido.mp4");
         assert_eq!(v["mime"], "video/mp4");
 
@@ -1055,5 +1105,56 @@ mod tests {
             .await?;
         assert_eq!(r.status(), 400);
         Ok(())
+    }
+
+    #[test]
+    fn parse_range_casos() {
+        use axum::http::HeaderValue;
+
+        let total = 10_000u64;
+
+        // Sin header: todo el rango
+        assert_eq!(parse_range(None, total), Ok((0, 9999)));
+
+        // Rango normal
+        let h = HeaderValue::from_static("bytes=0-499");
+        assert_eq!(parse_range(Some(&h), total), Ok((0, 499)));
+
+        // Rango abierto al final
+        let h = HeaderValue::from_static("bytes=500-");
+        assert_eq!(parse_range(Some(&h), total), Ok((500, 9999)));
+
+        // Rango sufijo (HIGH-01): últimos 500 bytes -> (9500, 9999)
+        let h = HeaderValue::from_static("bytes=-500");
+        assert_eq!(parse_range(Some(&h), total), Ok((9500, 9999)));
+
+        // Sufijo mayor al total: clamp a 0 -> (0, 9999)
+        let h = HeaderValue::from_static("bytes=-20000");
+        assert_eq!(parse_range(Some(&h), total), Ok((0, 9999)));
+
+        // Sufijo 0
+        let h = HeaderValue::from_static("bytes=-0");
+        assert_eq!(parse_range(Some(&h), total), Ok((0, 9999)));
+
+        // Rango inválido
+        let h = HeaderValue::from_static("bytes=abc-def");
+        assert_eq!(parse_range(Some(&h), total), Err(RangeError::Invalid));
+
+        // Start > End
+        let h = HeaderValue::from_static("bytes=500-200");
+        assert_eq!(
+            parse_range(Some(&h), total),
+            Err(RangeError::OutOfBounds(total))
+        );
+
+        // Fuera de límites
+        let h = HeaderValue::from_static("bytes=15000-16000");
+        assert_eq!(
+            parse_range(Some(&h), total),
+            Err(RangeError::OutOfBounds(total))
+        );
+
+        // Archivo vacío
+        assert_eq!(parse_range(None, 0), Err(RangeError::NoContent));
     }
 }

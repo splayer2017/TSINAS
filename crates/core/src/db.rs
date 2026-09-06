@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -7,7 +8,7 @@ use crate::policy::Policy;
 /// Fila de la proyección local (derivada de iroh-docs, no es fuente de verdad).
 /// `tag` es el nombre del tag persistente en el blob store que protege el
 /// contenido del GC; se borra al quitar el archivo (des-pinear).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileRow {
     pub path: String,
     pub hash: String,
@@ -18,15 +19,37 @@ pub struct FileRow {
     pub tag: String,
 }
 
+/// Metadato compartido de un archivo para sincronización P2P.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedFile {
+    pub path: String,
+    pub hash: String,
+    pub size: u64,
+    pub mime: String,
+    pub policy: Policy,
+    pub host_id: String,
+}
+
+impl SharedFile {
+    pub fn to_doc_value(&self) -> anyhow::Result<Vec<u8>> {
+        Ok(serde_json::to_vec(self)?)
+    }
+    pub fn from_doc_value(v: &[u8]) -> anyhow::Result<Self> {
+        Ok(serde_json::from_slice(v)?)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Db {
     inner: Arc<Mutex<Connection>>,
 }
 
-/// Crea el esquema y migra DBs antiguas (columna `tag`).
+/// Crea el esquema, activa WAL mode y migra DBs antiguas.
 fn ensure_schema(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS files(
+        "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=NORMAL;
+         CREATE TABLE IF NOT EXISTS files(
             path TEXT PRIMARY KEY,
             hash TEXT NOT NULL,
             size INTEGER NOT NULL,
@@ -35,11 +58,9 @@ fn ensure_schema(conn: &Connection) -> anyhow::Result<()> {
             host_id TEXT NOT NULL DEFAULT '',
             tag TEXT NOT NULL DEFAULT ''
         );
-        CREATE TABLE IF NOT EXISTS devices(
-            endpoint_id TEXT PRIMARY KEY,
-            tailnet_ip TEXT NOT NULL DEFAULT '',
-            name TEXT NOT NULL DEFAULT '',
-            last_seen INTEGER NOT NULL DEFAULT 0
+        CREATE TABLE IF NOT EXISTS settings(
+            key TEXT PRIMARY KEY,
+            val TEXT NOT NULL
         );",
     )?;
     // Migración idempotente para DBs creadas antes de `tag`.
@@ -122,11 +143,52 @@ impl Db {
         Ok(rows.next().transpose()?)
     }
 
+    pub fn get_by_path(&self, path: &str) -> anyhow::Result<Option<FileRow>> {
+        let conn = self.inner.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT path,hash,size,mime,policy,host_id,tag FROM files WHERE path=?")?;
+        let mut rows = stmt.query_map([path], row_from)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn get_rows_by_hash(&self, hash: &str) -> anyhow::Result<Vec<FileRow>> {
+        let conn = self.inner.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT path,hash,size,mime,policy,host_id,tag FROM files WHERE hash=?")?;
+        let rows = stmt
+            .query_map([hash], row_from)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Borra la fila por hash. Devuelve `true` si existía.
     pub fn delete_by_hash(&self, hash: &str) -> anyhow::Result<bool> {
         let conn = self.inner.lock().unwrap();
         let n = conn.execute("DELETE FROM files WHERE hash=?", [hash])?;
         Ok(n > 0)
+    }
+
+    /// Borra la fila por path. Devuelve `true` si existía.
+    pub fn delete_by_path(&self, path: &str) -> anyhow::Result<bool> {
+        let conn = self.inner.lock().unwrap();
+        let n = conn.execute("DELETE FROM files WHERE path=?", [path])?;
+        Ok(n > 0)
+    }
+
+    pub fn get_setting(&self, key: &str) -> anyhow::Result<Option<String>> {
+        let conn = self.inner.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT val FROM settings WHERE key=?")?;
+        let mut rows = stmt.query_map([key], |r| r.get(0))?;
+        Ok(rows.next().transpose()?)
+    }
+
+    pub fn set_setting(&self, key: &str, val: &str) -> anyhow::Result<()> {
+        let conn = self.inner.lock().unwrap();
+        conn.execute(
+            "INSERT INTO settings(key, val) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET val=excluded.val",
+            params![key, val],
+        )?;
+        Ok(())
     }
 }
 
@@ -150,9 +212,13 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert!(!all[0].policy.allows_download());
         assert!(all[0].policy.allows_stream());
-        assert!(db.delete_by_hash("no-existe")? == false);
+        assert!(!db.delete_by_hash("no-existe")?);
         assert!(db.delete_by_hash("abc")?);
         assert!(db.list_files()?.is_empty());
+
+        // Settings test
+        db.set_setting("active_doc", "doc-123")?;
+        assert_eq!(db.get_setting("active_doc")?, Some("doc-123".into()));
         Ok(())
     }
 }

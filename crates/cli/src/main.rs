@@ -8,12 +8,9 @@
 //! GET /stream/<hash> con Range, sin persistir a disco.
 
 use std::path::PathBuf;
-use std::str::FromStr;
+use std::sync::Arc;
 
-use iroh_blobs::Hash;
-use iroh_docs::api::protocol::{AddrInfoOptions, ShareMode};
 use p2p_nube_core::{db::FileRow, gateway::Gateway, tailnet, Library, Node, Policy};
-use p2p_nube_vault::{guess_mime, SharedFile};
 
 fn usage() -> ! {
     eprintln!(
@@ -151,93 +148,73 @@ async fn main() -> anyhow::Result<()> {
 
     let node = Node::spawn(data_dir.clone()).await?;
     println!("endpoint id : {}", node.endpoint_id());
-    match tailnet::tailnet_ipv4() {
+    match tailnet::tailnet_ipv4_async().await {
         Ok(ip) => println!("tailnet ip  : {ip}  (verifica con `tailscale status`)"),
         Err(e) => println!("tailnet ip  : no detectada ({e}) — ¿tailscaled activo?"),
     }
-    if let Some(dns) = tailnet::magic_dns() {
+    if let Some(dns) = tailnet::magic_dns_async().await {
         println!("magic dns   : {dns}");
     }
 
-    // Biblioteca compartida CLI↔web: si se dio archivo inicial se importa
-    // al store + índice (+ doc/ticket P2P); si no, se arranca vacío y todo
-    // se añade después desde la pestaña Añadir (host) de la web.
-    let library = Library::new(
-        node.blobs_store.clone(),
-        node.db.clone(),
-        node.endpoint_id(),
-    )
-    .with_media_roots(media_roots.clone());
+    // BLOCK-01: Obtiene o crea la biblioteca activa persistida en iroh-docs/SQLite.
+    // HIGH-07: Emite ticket con ShareMode::Read por defecto.
+    let (doc, author, ticket_s) = node.get_or_create_library().await?;
+
+    // BLOCK-03: Directorio de staging en almacenamiento persistente dentro de data_dir
+    let staging_dir = data_dir.join("staging");
+    let _ = std::fs::create_dir_all(&staging_dir);
+
+    // Biblioteca compartida CLI↔web: conectada al doc P2P para sincronización continua.
+    let library = Arc::new(
+        Library::new(
+            node.blobs_store.clone(),
+            node.db.clone(),
+            node.endpoint_id(),
+        )
+        .with_media_roots(media_roots.clone())
+        .with_staging_dir(staging_dir)
+        .with_doc(doc.clone(), author),
+    );
+
     // Hash del archivo inicial, si lo hubo (para las URLs de ejemplo).
     let mut hash_s = String::new();
-    // Ticket P2P del doc inicial, si lo hubo.
-    let mut ticket_s = String::new();
     if let Some(f) = file.as_ref() {
         let added = library.add_file(&f.to_string_lossy(), None).await?;
-        let tag_hash = Hash::from_str(&added.hash)?;
-        let size = added.size;
-        let name = added.path.clone();
         println!("blob hash   : {}", added.hash);
-        println!("tamaño      : {size} bytes");
+        println!("tamaño      : {} bytes", added.size);
 
-        // 2. Biblioteca nueva (doc) + entrada que referencia el blob.
-        let author = node.docs.author_default().await?;
-        let doc = node.docs.create().await?;
-        doc.set_hash(author, name.as_bytes().to_vec(), tag_hash, size)
-            .await?;
-        let ticket = doc
-            .share(ShareMode::Write, AddrInfoOptions::RelayAndAddresses)
-            .await?;
-        println!("doc ticket  : {ticket}");
-        ticket_s = ticket.to_string();
-
-        // 3. Proyección local + metadato JSON (lo que el móvil verá).
-        // `add_file` ya insertó la fila como StreamOnly; si se pidió otra
-        // política se actualiza conservando el tag (protección anti-GC).
-        let tag_s = node
-            .db
-            .get_by_hash(&added.hash)?
-            .map(|r| r.tag)
-            .unwrap_or_default();
-        let shared = SharedFile {
-            path: name.clone(),
-            hash: added.hash.clone(),
-            size,
-            mime: guess_mime(&name),
-            policy,
-            host_id: node.endpoint_id(),
-        };
-        node.db.upsert_file(&FileRow {
-            path: shared.path.clone(),
-            hash: shared.hash.clone(),
-            size,
-            mime: shared.mime.clone(),
-            policy,
-            host_id: shared.host_id.clone(),
-            tag: tag_s,
-        })?;
+        if policy != Policy::StreamOnly {
+            let tag_s = node
+                .db
+                .get_by_hash(&added.hash)?
+                .map(|r| r.tag)
+                .unwrap_or_default();
+            node.db.upsert_file(&FileRow {
+                path: added.path.clone(),
+                hash: added.hash.clone(),
+                size: added.size,
+                mime: added.mime.clone(),
+                policy,
+                host_id: node.endpoint_id(),
+                tag: tag_s,
+            })?;
+        }
         println!(
             "política    : {} (allows_download={})",
             policy.as_str(),
             policy.allows_download()
         );
-        hash_s = shared.hash.clone();
+        hash_s = added.hash.clone();
     } else {
         println!("biblioteca  : vacía — añade vídeos desde la pestaña Añadir (host) de la web");
     }
 
-    // 4. Servidor web + UI + API. El tag persistente queda registrado en la
-    // DB (columna `tag`); al quitar desde la web se des-pinea para liberar.
+    // Servidor web + UI + API conectado a la biblioteca P2P.
     let endpoint_id = node.endpoint_id();
+    let _ = endpoint_id;
     if http_local {
         // Fallback: HTTP loopback efímero (sin TLS, solo este PC).
-        let (base, _handle) = Gateway::serve_loopback_with_roots(
-            node.blobs_store.clone(),
-            node.db.clone(),
-            endpoint_id.clone(),
-            media_roots.clone(),
-        )
-        .await?;
+        let (base, _handle) = Gateway::serve_loopback_with_library(library.clone()).await?;
         println!("\n== UI WEB LOCAL (sin TLS) ==");
         println!("  {base}/   (lista + reproductor)");
         println!("  curl -s {base}/api/files");
@@ -261,16 +238,8 @@ async fn main() -> anyhow::Result<()> {
         };
         let (cert, key) = ensure_tailnet_cert(&data_dir, &domain)?;
         let addr = std::net::SocketAddr::new(bind_ip, port);
-        let (_handle, bound) = Gateway::serve_tls_with_roots(
-            node.blobs_store.clone(),
-            node.db.clone(),
-            endpoint_id.clone(),
-            addr,
-            &cert,
-            &key,
-            media_roots.clone(),
-        )
-        .await?;
+        let (_handle, bound) =
+            Gateway::serve_tls_with_library(library.clone(), addr, &cert, &key).await?;
         let _ = bound;
         let url = format!("https://{domain}:{port}");
         println!("\n== MODO DEV (URL fija) ==");
@@ -280,12 +249,8 @@ async fn main() -> anyhow::Result<()> {
         println!("  Celular : abre {url}/ en Chrome Android (misma tailnet) → ▶ Reproducir + seek");
         println!("  Local   : también responde en https://{bind_ip}:{port}/ (cert del dominio)");
     }
-    if !ticket_s.is_empty() {
-        println!("\n== TICKET P2P (para el futuro visor nativo / 2º nodo) ==");
-        println!("  {ticket_s}");
-    } else {
-        println!("\n(sin ticket P2P: arranca con un ARCHIVO inicial para generar uno)");
-    }
+    println!("\n== TICKET P2P (para el visor nativo / 2º nodo) ==");
+    println!("  {ticket_s}");
 
     tokio::signal::ctrl_c().await?;
     println!("\ncerrando…");

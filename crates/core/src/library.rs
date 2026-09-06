@@ -11,7 +11,9 @@ use std::sync::{
     Arc, Mutex,
 };
 
+use iroh_blobs::api::blobs::{AddPathOptions, ImportMode};
 use iroh_blobs::api::Store as BlobsStore;
+use iroh_blobs::BlobFormat;
 
 use crate::db::{Db, FileRow};
 use crate::policy::Policy;
@@ -36,20 +38,72 @@ pub struct Library {
     endpoint_id: String,
     /// Raíces permitidas (canonicalizadas). Vacío = sin restricción.
     media_roots: Vec<PathBuf>,
+    staging_dir: PathBuf,
+    doc: Option<iroh_docs::api::Doc>,
+    author: Option<iroh_docs::AuthorId>,
+}
+
+/// Guardia RAII para archivos temporales de staging.
+/// Si la tarea asíncrona se interrumpe (p.ej. cliente cierra conexión a mitad de subida),
+/// `drop` asegura que el archivo temporal sea eliminado del disco inmediatamente.
+pub struct TempStagedFile {
+    path: PathBuf,
+    committed: bool,
+}
+
+impl TempStagedFile {
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            committed: false,
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for TempStagedFile {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 impl Library {
     pub fn new(store: BlobsStore, db: Db, endpoint_id: String) -> Self {
+        let staging_dir =
+            std::env::temp_dir().join(format!("p2p-nube-staging-{}", std::process::id()));
         Self {
             store,
             db,
             endpoint_id,
             media_roots: Vec::new(),
+            staging_dir,
+            doc: None,
+            author: None,
         }
     }
 
     pub fn with_media_roots(mut self, roots: Vec<PathBuf>) -> Self {
         self.media_roots = roots;
+        self
+    }
+
+    pub fn with_staging_dir(mut self, path: PathBuf) -> Self {
+        self.staging_dir = path;
+        self
+    }
+
+    pub fn with_doc(mut self, doc: iroh_docs::api::Doc, author: iroh_docs::AuthorId) -> Self {
+        self.doc = Some(doc);
+        self.author = Some(author);
         self
     }
 
@@ -59,6 +113,18 @@ impl Library {
 
     pub fn db(&self) -> &Db {
         &self.db
+    }
+
+    pub fn endpoint_id(&self) -> &str {
+        &self.endpoint_id
+    }
+
+    pub fn staging_dir(&self) -> &Path {
+        &self.staging_dir
+    }
+
+    pub fn doc(&self) -> Option<&iroh_docs::api::Doc> {
+        self.doc.as_ref()
     }
 
     /// Valida un path contra las raíces permitidas y lo canonicaliza.
@@ -97,11 +163,28 @@ impl Library {
             _ => name.clone(),
         };
 
-        // iroh-blobs exige ruta absoluta; `add_path` la importa al store.
-        let tag = self.store.blobs().add_path(&abs).await?;
+        // Zero-Copy: referenciar en su ubicación original (disco secundario o local)
+        // sin copiar los bytes al almacenamiento interno de blobs (DataLocation::External).
+        let tag = self
+            .store
+            .blobs()
+            .add_path_with_opts(AddPathOptions {
+                path: abs.clone(),
+                mode: ImportMode::TryReference,
+                format: BlobFormat::Raw,
+            })
+            .await?;
         let hash_s = tag.hash.to_string();
         let tag_s = String::from_utf8_lossy(tag.name.as_ref()).to_string();
-        let mime = p2p_nube_vault_mime(&name);
+        let mime = guess_mime(&name);
+
+        // MED-01: Si ya existía un tag previo para esta ruta, y cambió,
+        // des-pinearlo de store.tags() para evitar fugas de disco.
+        if let Ok(Some(prev)) = self.db.get_by_path(&path) {
+            if !prev.tag.is_empty() && prev.tag != tag_s {
+                let _ = self.store.tags().delete(prev.tag.as_bytes()).await;
+            }
+        }
 
         self.db.upsert_file(&FileRow {
             path: path.clone(),
@@ -112,6 +195,14 @@ impl Library {
             host_id: self.endpoint_id.clone(),
             tag: tag_s,
         })?;
+
+        // BLOCK-01: Publicar entrada en iroh-docs si hay un doc activo
+        if let (Some(doc), Some(author)) = (&self.doc, &self.author) {
+            let _ = doc
+                .set_hash(*author, path.as_bytes().to_vec(), tag.hash, size)
+                .await;
+        }
+
         Ok(AddedFile {
             path,
             hash: hash_s,
@@ -175,7 +266,15 @@ impl Library {
         let tag = self.store.blobs().add_path(staged).await?;
         let hash_s = tag.hash.to_string();
         let tag_s = String::from_utf8_lossy(tag.name.as_ref()).to_string();
-        let mime = p2p_nube_vault_mime(&name);
+        let mime = guess_mime(&name);
+
+        // MED-01: Des-pinear tag anterior si existía para este archivo y cambió
+        if let Ok(Some(prev)) = self.db.get_by_path(&name) {
+            if !prev.tag.is_empty() && prev.tag != tag_s {
+                let _ = self.store.tags().delete(prev.tag.as_bytes()).await;
+            }
+        }
+
         self.db.upsert_file(&FileRow {
             path: name.clone(),
             hash: hash_s.clone(),
@@ -185,6 +284,14 @@ impl Library {
             host_id: self.endpoint_id.clone(),
             tag: tag_s,
         })?;
+
+        // BLOCK-01: Publicar entrada en iroh-docs si hay un doc activo
+        if let (Some(doc), Some(author)) = (&self.doc, &self.author) {
+            let _ = doc
+                .set_hash(*author, name.as_bytes().to_vec(), tag.hash, size)
+                .await;
+        }
+
         // El contenido ya quedó en el blob store; liberar el temporal.
         let _ = std::fs::remove_file(staged);
         Ok(AddedFile {
@@ -199,16 +306,39 @@ impl Library {
     /// store libere el espacio. Nunca borra el archivo original del usuario.
     /// Devuelve `true` si existía.
     pub async fn remove_by_hash(&self, hash: &str) -> anyhow::Result<bool> {
-        let row = match self.db.get_by_hash(hash)? {
+        let rows = self.db.get_rows_by_hash(hash)?;
+        if rows.is_empty() {
+            return Ok(false);
+        }
+        for row in &rows {
+            // Des-pineo del tag
+            if !row.tag.is_empty() {
+                let _ = self.store.tags().delete(row.tag.as_bytes()).await;
+            }
+            // Borrar de iroh-docs si está configurado
+            if let (Some(doc), Some(author)) = (&self.doc, &self.author) {
+                let _ = doc.del(*author, row.path.as_bytes().to_vec()).await;
+            }
+        }
+        self.db.delete_by_hash(hash)
+    }
+
+    /// Quita un archivo de la lista por path específico. Si otros archivos
+    /// comparten el mismo hash/tag, preserva el tag en el blob store.
+    pub async fn remove_by_path(&self, path: &str) -> anyhow::Result<bool> {
+        let row = match self.db.get_by_path(path)? {
             Some(r) => r,
             None => return Ok(false),
         };
-        // Des-pineo best-effort: si el tag ya no existe, `delete` devuelve 0
-        // sin fallar; si el store es efímero no pasa nada.
-        if !row.tag.is_empty() {
+        // Verificar si algún otro archivo comparte el mismo tag antes de des-pinear
+        let all_rows = self.db.get_rows_by_hash(&row.hash)?;
+        if all_rows.len() <= 1 && !row.tag.is_empty() {
             let _ = self.store.tags().delete(row.tag.as_bytes()).await;
         }
-        self.db.delete_by_hash(hash)
+        if let (Some(doc), Some(author)) = (&self.doc, &self.author) {
+            let _ = doc.del(*author, row.path.as_bytes().to_vec()).await;
+        }
+        self.db.delete_by_path(path)
     }
 }
 
@@ -286,8 +416,8 @@ fn sanitize_filename(raw: &str) -> String {
     clean.chars().take(128).collect()
 }
 
-/// MIME mínimo sin depender del crate vault (evita ciclo core→vault).
-fn p2p_nube_vault_mime(name: &str) -> String {
+/// Determina el tipo MIME según la extensión del archivo (insensible a mayúsculas).
+pub fn guess_mime(name: &str) -> String {
     let n = name.to_lowercase();
     if n.ends_with(".mkv") {
         "video/x-matroska"
@@ -307,6 +437,9 @@ fn p2p_nube_vault_mime(name: &str) -> String {
 // Jobs: progreso del escaneo en background (hashear 24 MKV tarda minutos).
 // ---------------------------------------------------------------------------
 
+/// Capacidad máxima de tareas retenidas en memoria para evitar fugas (HIGH-05).
+pub const MAX_JOBS: usize = 50;
+
 /// Estado público de un job de escaneo.
 #[derive(Debug, Clone)]
 pub struct JobState {
@@ -318,7 +451,7 @@ pub struct JobState {
     pub errors: Vec<String>,
 }
 
-/// Registro de jobs en memoria.
+/// Registro de jobs en memoria con límite acotado (FIFO).
 #[derive(Debug, Clone, Default)]
 pub struct Jobs {
     inner: Arc<Mutex<HashMap<String, JobState>>>,
@@ -328,7 +461,19 @@ pub struct Jobs {
 impl Jobs {
     pub fn create(&self, total: usize) -> String {
         let id = self.next.fetch_add(1, Ordering::SeqCst).to_string();
-        self.inner.lock().unwrap().insert(
+        let mut m = self.inner.lock().unwrap();
+
+        // Si superamos la capacidad máxima, purgamos las tareas más antiguas
+        if m.len() >= MAX_JOBS {
+            let mut keys: Vec<u64> = m.keys().filter_map(|k| k.parse().ok()).collect();
+            keys.sort_unstable();
+            let to_remove = m.len() - MAX_JOBS + 1;
+            for k in keys.into_iter().take(to_remove) {
+                m.remove(&k.to_string());
+            }
+        }
+
+        m.insert(
             id.clone(),
             JobState {
                 id: id.clone(),
@@ -448,6 +593,57 @@ mod tests {
         let f = fuera.path().join("a.mkv");
         std::fs::write(&f, b"x")?;
         assert!(lib.add_file(&f.to_string_lossy(), None).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_file_zero_copy_con_fs_store() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let blobs_dir = dir.path().join("blobs");
+        std::fs::create_dir_all(&blobs_dir)?;
+        let fs_opts = iroh_blobs::store::fs::options::Options::new(&blobs_dir);
+        let fs_store =
+            iroh_blobs::store::fs::FsStore::load_with_opts(blobs_dir.join("blobs.db"), fs_opts)
+                .await?;
+        let store: BlobsStore = fs_store.into();
+        let db = Db::open_in_memory()?;
+        let lib = Library::new(store, db, "test-host".into());
+
+        // Archivo de ~5 MB para superar el umbral de inlining de outboard (16 KB de outboard)
+        let media_dir = tempfile::tempdir()?;
+        let source_file = media_dir.path().join("test_video.mkv");
+        let content = vec![0x42; 5 * 1024 * 1024 + 128];
+        std::fs::write(&source_file, &content)?;
+
+        let added = lib.add_file(&source_file.to_string_lossy(), None).await?;
+        assert_eq!(added.path, "test_video.mkv");
+        let hash = parse_hash(&added.hash)?;
+        assert!(lib.store.blobs().has(hash).await?);
+
+        // Zero-copy: el archivo de datos NO debe crearse en blobs/data
+        let data_file = blobs_dir.join("data").join(format!("{}.data", added.hash));
+        assert!(
+            !data_file.exists(),
+            "El archivo de datos NO debe copiarse a blobs/data (Zero-Copy)"
+        );
+
+        // El archivo outboard (.obao4) sí se crea en disco para archivos > 4 MB
+        let obao_file = blobs_dir.join("data").join(format!("{}.obao4", added.hash));
+        assert!(
+            obao_file.exists(),
+            "Debe existir el árbol outboard (.obao4) en disco para verificación P2P"
+        );
+
+        // Verificamos que se puede leer el contenido referenciado a través del reader de iroh
+        use tokio::io::AsyncReadExt;
+        let mut reader = lib.store.blobs().reader(hash);
+        let mut read_buf = Vec::new();
+        reader.read_to_end(&mut read_buf).await?;
+        assert_eq!(
+            read_buf, content,
+            "Los bytes leídos del store deben coincidir exactamente con el archivo original"
+        );
+
         Ok(())
     }
 
