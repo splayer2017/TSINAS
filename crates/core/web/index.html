@@ -173,15 +173,23 @@ label.check{display:flex;gap:8px;align-items:center;font-size:13px;color:var(--m
       <button id="btn-scan" onclick="scanFolder()">Escanear</button>
     </div>
     <div class="row">
+      <select id="scan-mode" onchange="toggleScanMode()"><option value="new">Nueva serie…</option><option value="existing">Serie ya creada…</option></select>
+    </div>
+    <div class="row" id="scan-new-row">
       <input type="text" id="scan-col" placeholder="Agrupar en serie (opcional) — p.ej. Frieren" autocomplete="off" spellcheck="false">
       <select id="scan-kind"><option value="series">Serie</option><option value="movie">Película</option></select>
       <input type="text" id="scan-season" placeholder="Temporada 1 (crea la sub-colección)" style="max-width:220px">
+    </div>
+    <div class="row" id="scan-exist-row" style="display:none">
+      <select id="scan-root" onchange="refreshAddLeaf('scan')"></select>
+      <select id="scan-leaf"></select>
+      <input type="text" id="scan-new-season" placeholder="…o temporada nueva (opcional)" style="max-width:220px" autocomplete="off" spellcheck="false">
     </div>
     <div id="jobbox" style="display:none">
       <div class="row"><progress id="jobbar" max="100" value="0"></progress><span class="hint" id="jobtxt"></span></div>
       <div id="joblog"></div>
     </div>
-    <p class="hint">Cero copias: indexa sin mover ni duplicar. Si rellenas la serie, los vídeos se agrupan en su temporada al terminar el escaneo.</p>
+    <p class="hint">Cero copias: indexa sin mover ni duplicar. En modo «Nueva serie» puedes agrupar al terminar; en «Serie ya creada» los vídeos van directos a la temporada elegida (o a la nueva que escribas).</p>
   </div>
   <div class="card">
     <h2>Añadir archivo por ruta <span class="badge badge-zc">Zero-Copy</span></h2>
@@ -189,12 +197,23 @@ label.check{display:flex;gap:8px;align-items:center;font-size:13px;color:var(--m
       <input type="text" id="filepath" placeholder="/home/uriel/mnt/Storage/Videos/cap01.mkv" autocomplete="off" spellcheck="false">
       <button id="btn-add" onclick="addFile()">Añadir</button>
     </div>
+    <div class="row">
+      <select id="file-root" onchange="refreshAddLeaf('file')"></select>
+      <select id="file-leaf"></select>
+      <input type="text" id="file-new-season" placeholder="…o temporada nueva (opcional)" style="max-width:220px" autocomplete="off" spellcheck="false">
+    </div>
+    <p class="hint">Destino opcional en una colección ya creada — déjalo en «Solo Biblioteca» para no agrupar. Elegir serie con temporadas exige temporada.</p>
   </div>
   <div class="card">
     <h2>Subir desde este dispositivo <span class="badge badge-copy">Copia al host</span></h2>
     <div class="row">
       <input type="file" id="fileinput" accept="video/*,.mkv,.mp4,.webm,.avi" multiple>
       <button id="btn-upload" onclick="uploadFiles()">Subir</button>
+    </div>
+    <div class="row">
+      <select id="up-root" onchange="refreshAddLeaf('up')"></select>
+      <select id="up-leaf"></select>
+      <input type="text" id="up-new-season" placeholder="…o temporada nueva (opcional)" style="max-width:220px" autocomplete="off" spellcheck="false">
     </div>
     <div id="upbox" style="display:none">
       <div class="row"><progress id="upbar" max="100" value="0"></progress><span class="hint" id="uptxt"></span></div>
@@ -215,7 +234,7 @@ label.check{display:flex;gap:8px;align-items:center;font-size:13px;color:var(--m
 <script>
 const $=s=>document.querySelector(s);
 let FILES=[],COLS=[],cur=null,curDetail=null,expandedRoot=null,expandedKid=null,DETAILCACHE={};
-function show(w){for(const v of ['list','cols','add']){$('#view-'+v).classList.toggle('active',v===w);$('#tab-'+v).setAttribute('aria-selected',v===w?'true':'false');}if(w==='cols')loadCols();}
+function show(w){for(const v of ['list','cols','add']){$('#view-'+v).classList.toggle('active',v===w);$('#tab-'+v).setAttribute('aria-selected',v===w?'true':'false');}if(w==='cols'||w==='add')loadCols();}
 function toast(m){const d=document.createElement('div');d.textContent=m;$('#toast').appendChild(d);setTimeout(()=>d.remove(),2600);}
 function err(m){const e=$('#err');e.style.display='block';e.textContent=m;}
 function clear(){const e=$('#err');e.style.display='none';}
@@ -255,6 +274,13 @@ function normDetail(d){
 }
 function leaves(){const out=[];const seen=new Set();const push=(c)=>{if(!c||!c.id||seen.has(c.id))return;seen.add(c.id);out.push(c);};for(const r of roots()){const k=kidsOf(r.id);if(!k.length)push(r);else for(const c of k)push(c);}return out;}
 function leafLabel(c){if(!c.parent_id)return (c.kind==='movie'?'Película: ':'Serie (suelta): ')+c.title;const p=COLS.find(r=>r.id===c.parent_id);return (p?p.title:'?')+' › '+c.title;}
+/* ---- Añadir: destino en colecciones ya creadas ---- */
+function toggleScanMode(){const ex=$('#scan-mode')&&$('#scan-mode').value==='existing';if($('#scan-new-row'))$('#scan-new-row').style.display=ex?'none':'';if($('#scan-exist-row'))$('#scan-exist-row').style.display=ex?'':'none';if(ex)fillAddTargets();}
+function addRootLabel(c){return (c.kind==='movie'?'Película: ':'Serie: ')+c.title;}
+function fillAddTargets(){for(const p of ['scan','file','up']){const rs=$('#'+p+'-root');if(!rs)continue;const keep=rs.value;rs.innerHTML='';if(p!=='scan'){const o0=document.createElement('option');o0.value='';o0.textContent='Solo Biblioteca (sin agrupar)';rs.appendChild(o0);}const rs2=roots();if(!rs2.length){const o=document.createElement('option');o.value='';o.textContent=p==='scan'?'(sin colecciones: usa modo Nueva)':'(sin colecciones)';o.disabled=true;rs.appendChild(o);}for(const r of rs2){const o=document.createElement('option');o.value=r.id;o.textContent=addRootLabel(r);rs.appendChild(o);}if(keep)rs.value=keep;refreshAddLeaf(p);}}
+function refreshAddLeaf(p){const rs=$('#'+p+'-root'),ls=$('#'+p+'-leaf'),ni=$('#'+p+'-new-season');if(!rs||!ls)return;const rid=rs.value;const root=COLS.find(c=>c.id===rid);const kids=rid?kidsOf(rid):[];ls.innerHTML='';if(!rid){ls.style.display='none';if(ni)ni.style.display='none';return;}if(root&&root.kind==='movie'){ls.style.display='none';if(ni){ni.style.display='none';ni.value='';}return;}ls.style.display='';if(ni)ni.style.display='';if(!kids.length){const o=document.createElement('option');o.value=rid;o.textContent='Toda la colección';ls.appendChild(o);ls.style.display='none';return;}for(const k of kids){const o=document.createElement('option');o.value=k.id;o.textContent=(k.kind==='movie'?'Película · ':'Temporada · ')+k.title;ls.appendChild(o);}}
+async function ensureAddTarget(p){const rs=$('#'+p+'-root');if(!rs)return '';const rid=rs.value;if(!rid)return '';const root=COLS.find(c=>c.id===rid);if(!root)return '';const ni=$('#'+p+'-new-season');const nt=(ni?ni.value:'').trim();if(nt){if(root.kind==='movie')throw new Error('una película no admite temporadas');const r=await fetch('/api/collections/'+rid+'/children',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:'season',title:nt})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));DETAILCACHE={};await loadCols(true);fillAddTargets();if(ni)ni.value='';return j.id;}const kids=kidsOf(rid);if(kids.length){const ls=$('#'+p+'-leaf');const lid=ls?ls.value:'';if(!lid)throw new Error('elige una temporada dentro de la serie');return lid;}return rid;}
+async function attachToCollection(cid,filePath){const r=await fetch('/api/collections/'+cid+'/items',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file_path:filePath,season:'',label:'',pos:0})});if(!r.ok){const j=await r.json().catch(()=>({}));throw new Error(j.error||('HTTP '+r.status));}}
 async function copyUrl(f,ev){if(ev)ev.preventDefault();const u=streamUrl(f||cur||{hash:''});try{await navigator.clipboard.writeText(u);toast('URL copiada para VLC');}catch(e){prompt('Copia la URL para VLC:',u);}}
 async function info(){try{const r=await fetch('/api/info');const j=await r.json();$('#info').textContent='nodo '+j.endpoint_id.slice(0,12)+'… · '+j.files+' archivo(s)';}catch(e){$('#info').textContent='sin conexión con el host';}}
 async function refresh(){await info();await files();await loadCols(true);}
@@ -311,6 +337,7 @@ async function removeFile(f,btn){if(!confirm('¿Quitar "'+disp(f)+'" de la lista
 /* ---- Colecciones: grid + acordeón + detalle ---- */
 async function loadCols(silent){try{const r=await fetch('/api/collections');COLS=await r.json();renderCols();if(expandedRoot)await renderTree();if(curDetail)openCol(curDetail,true);if(!silent)render();}catch(e){if(!silent)cerr('Sin colecciones: '+e.message);}}
 function renderCols(){
+  try{if(typeof fillAddTargets==='function')fillAddTargets();}catch(e){}
   const box=$('#cols');box.innerHTML='';
   const rs=roots();
   if(!rs.length){box.innerHTML='<div class="empty">Sin colecciones — crea tu primera Serie o Película arriba.</div>';$('#treebox').innerHTML='';return;}
@@ -556,10 +583,10 @@ async function delCol(id,isChild){if(!confirm(isChild?'¿Quitar esta sub-colecci
 async function unlink(cid,path){try{const r=await fetch('/api/collections/'+cid+'/items?path='+encodeURIComponent(path),{method:'DELETE'});if(!r.ok)throw new Error('HTTP '+r.status);DETAILCACHE={};openCol(curDetail||cid,true);await loadCols(true);if(expandedRoot)renderTree();}catch(e){cerr('No se pudo sacar: '+e.message);}}
 async function uploadPoster(id,inp){if(!inp.files.length){cerr('Elige una imagen.');return;}const fd=new FormData();fd.append('poster',inp.files[0]);try{const r=await fetch('/api/collections/'+id+'/poster',{method:'POST',body:fd});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));cok('Portada subida');DETAILCACHE={};await loadCols(true);openCol(id,true);if(expandedRoot)renderTree();}catch(e){cerr('No se pudo subir: '+e.message);}}
 /* ---- Añadir ---- */
-async function addFile(){aclear();const p=$('#filepath').value.trim();if(!p){aerr('Escribe la ruta del archivo en el servidor.');return;}$('#btn-add').disabled=true;try{const r=await fetch('/api/library/add-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));aok('Añadido: '+j.path+' ('+fmt(j.size)+')');$('#filepath').value='';refresh();}catch(e){aerr('No se pudo añadir: '+e.message);}finally{$('#btn-add').disabled=false;}}
-async function scanFolder(){aclear();const p=$('#folderpath').value.trim();if(!p){aerr('Escribe la ruta de la carpeta en el servidor.');return;}$('#btn-scan').disabled=true;$('#jobbox').style.display='none';try{const r=await fetch('/api/library/scan-folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p,recursive:$('#recursive').checked,collection_title:$('#scan-col').value.trim(),collection_kind:$('#scan-kind').value,season:$('#scan-season').value.trim()})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));if(j.found===0){aok('Carpeta vacía: no hay vídeos.');return;}if(j.collection_id){aok('Escaneando y agrupando en la colección…');}$('#jobbox').style.display='block';pollJob(j.job_id);}catch(e){aerr('No se pudo escanear: '+e.message);$('#btn-scan').disabled=false;}}
+async function addFile(){aclear();const p=$('#filepath').value.trim();if(!p){aerr('Escribe la ruta del archivo en el servidor.');return;}$('#btn-add').disabled=true;try{let target='';try{target=await ensureAddTarget('file');}catch(e){aerr(e.message);return;}const r=await fetch('/api/library/add-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));if(target){try{await attachToCollection(target,j.path);aok('Añadido y agrupado: '+j.path+' ('+fmt(j.size)+')');}catch(e2){aok('Añadido en Biblioteca, pero no se pudo agrupar: '+e2.message+' — muévelo a mano desde Biblioteca.');}}else aok('Añadido: '+j.path+' ('+fmt(j.size)+')');$('#filepath').value='';DETAILCACHE={};refresh();}catch(e){aerr('No se pudo añadir: '+e.message);}finally{$('#btn-add').disabled=false;}}
+async function scanFolder(){aclear();const p=$('#folderpath').value.trim();if(!p){aerr('Escribe la ruta de la carpeta en el servidor.');return;}$('#btn-scan').disabled=true;$('#jobbox').style.display='none';try{const body={path:p,recursive:$('#recursive').checked};if($('#scan-mode')&&$('#scan-mode').value==='existing'){let target='';try{target=await ensureAddTarget('scan');}catch(e){aerr(e.message);$('#btn-scan').disabled=false;return;}if(!target){aerr('Elige la serie/temporada destino o vuelve al modo «Nueva serie».');$('#btn-scan').disabled=false;return;}body.target_collection_id=target;}else{body.collection_title=$('#scan-col').value.trim();body.collection_kind=$('#scan-kind').value;body.season=$('#scan-season').value.trim();}const r=await fetch('/api/library/scan-folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));if(j.found===0){aok('Carpeta vacía: no hay vídeos.');return;}if(j.collection_id){aok('Escaneando y agrupando en la colección…');}$('#jobbox').style.display='block';pollJob(j.job_id);}catch(e){aerr('No se pudo escanear: '+e.message);$('#btn-scan').disabled=false;}}
 async function pollJob(id){try{const r=await fetch('/api/library/jobs/'+id);const j=await r.json();const pct=j.total?Math.round(j.done/j.total*100):100;$('#jobbar').value=pct;$('#jobtxt').textContent=j.done+'/'+j.total+' · '+j.status;$('#joblog').textContent=(j.errors||[]).join('\n');if(j.status==='running'){setTimeout(()=>pollJob(id),1000);return;}const ok=(j.added||[]).length;aok('Escaneo '+j.status+': '+ok+' añadido(s)'+(j.errors.length?' · '+j.errors.length+' con error (ver detalle)':''));DETAILCACHE={};refresh();}catch(e){aerr('Sin estado del escaneo: '+e.message);}finally{if($('#jobtxt').textContent.indexOf('running')<0)$('#btn-scan').disabled=false;}}
-async function uploadFiles(){aclear();const inp=$('#fileinput');if(!inp.files.length){aerr('Elige al menos un archivo con el selector.');return;}$('#btn-upload').disabled=true;$('#upbox').style.display='block';let ok=0;const errs=[];for(let i=0;i<inp.files.length;i++){const f=inp.files[i];$('#uptxt').textContent=(i+1)+'/'+inp.files.length+' · '+f.name;$('#upbar').value=Math.round(i/inp.files.length*100);const fd=new FormData();fd.append('file',f,f.name);try{const r=await fetch('/api/library/upload',{method:'POST',body:fd});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));ok++;}catch(e){errs.push(f.name+': '+e.message);}}$('#upbar').value=100;$('#uptxt').textContent=inp.files.length+'/'+inp.files.length;inp.value='';if(errs.length)aerr('Subidos '+ok+' de '+inp.files.length+'. Errores: '+errs.join(' | '));else aok('Subido(s): '+ok+' archivo(s) en la lista.');refresh();$('#btn-upload').disabled=false;}
+async function uploadFiles(){aclear();const inp=$('#fileinput');if(!inp.files.length){aerr('Elige al menos un archivo con el selector.');return;}$('#btn-upload').disabled=true;$('#upbox').style.display='block';let target='';try{target=await ensureAddTarget('up');}catch(e){aerr(e.message);$('#btn-upload').disabled=false;$('#upbox').style.display='none';return;}let ok=0,grouped=0;const errs=[],merrs=[];for(let i=0;i<inp.files.length;i++){const f=inp.files[i];$('#uptxt').textContent=(i+1)+'/'+inp.files.length+' · '+f.name;$('#upbar').value=Math.round(i/inp.files.length*100);const fd=new FormData();fd.append('file',f,f.name);try{const r=await fetch('/api/library/upload',{method:'POST',body:fd});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));ok++;if(target){try{await attachToCollection(target,j.path);grouped++;}catch(e2){merrs.push(f.name+': '+e2.message);}}}catch(e){errs.push(f.name+': '+e.message);}}$('#upbar').value=100;$('#uptxt').textContent=inp.files.length+'/'+inp.files.length;inp.value='';DETAILCACHE={};if(errs.length)aerr('Subidos '+ok+' de '+inp.files.length+'. Errores: '+errs.join(' | '));else if(target)aok('Subido(s): '+ok+' archivo(s)'+(grouped===ok?' y agrupados.':' — agrupados '+grouped+' de '+ok+(merrs.length?'. No agrupados: '+merrs.join(' | '):'')));else aok('Subido(s): '+ok+' archivo(s) en la lista.');refresh();$('#btn-upload').disabled=false;}
 /* ---- Player híbrido: web + VLC siempre ---- */
 function play(f){cur=f;clear();const v=$('#v');$('#overlay').classList.add('open');$('#mtitle').textContent=disp(f);$('#mvlc').href=vlcIntent(f);const mkv=isMkv(f);$('#mnote').textContent=mkv?'MKV: si la web no lo abre, usa VLC (botón siempre disponible).':'MP4/WebM: reproducción nativa.';v.src='/stream/'+f.hash;v.play().catch(()=>{});}
 function closePlayer(){const v=$('#v');v.pause();v.removeAttribute('src');v.load();$('#overlay').classList.remove('open');cur=null;}

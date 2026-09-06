@@ -243,6 +243,10 @@ struct ScanFolderReq {
     collection_kind: String,
     #[serde(default)]
     season: String,
+    /// Destino ya existente (hoja: temporada/película o serie sin hijas).
+    /// Si viene, tiene prioridad sobre `collection_title`/`season`.
+    #[serde(default)]
+    target_collection_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -379,8 +383,50 @@ async fn api_scan_folder(
         let db = state.db.clone();
         let jid = job_id.clone();
         // Agrupación semiautomática: crear la raíz y, si hay temporada,
-        // la hija (los episodios viven en las hojas).
-        let auto_col: Option<(String, String)> = if !req.collection_title.trim().is_empty() {
+        // la hija (los episodios viven en las hojas). Si el cliente manda
+        // `target_collection_id`, se usa una hoja YA CREADA (verificada).
+        let target_id = req.target_collection_id.trim().to_string();
+        let auto_col: Option<(String, String)> = if !target_id.is_empty() {
+            match db.get_collection(&target_id) {
+                Ok(Some(col)) => {
+                    let kids = db.list_children(&col.id).unwrap_or_default();
+                    if !kids.is_empty() {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"error": "elige una temporada o película dentro de la serie"})),
+                        )
+                            .into_response();
+                    }
+                    let root = if col.parent_id.is_empty() {
+                        col.id.clone()
+                    } else {
+                        col.parent_id.clone()
+                    };
+                    Some((
+                        col.id.clone(),
+                        if root.is_empty() {
+                            col.id.clone()
+                        } else {
+                            root
+                        },
+                    ))
+                }
+                Ok(None) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": "la colección destino no existe"})),
+                    )
+                        .into_response();
+                }
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": e.to_string()})),
+                    )
+                        .into_response();
+                }
+            }
+        } else if !req.collection_title.trim().is_empty() {
             match db.create_collection(&req.collection_kind, &req.collection_title, "") {
                 Ok(root) => {
                     let target = if !req.season.trim().is_empty() {
@@ -1427,6 +1473,18 @@ mod tests {
             html.contains("Ver aquí") || html.contains("Reproducir"),
             "la UI debe ofrecer ver en la web"
         );
+        assert!(
+            html.contains("scan-mode") && html.contains("scan-root"),
+            "Añadir/Escanear debe ofrecer serie ya creada"
+        );
+        assert!(
+            html.contains("file-root") && html.contains("up-root"),
+            "Añadir por ruta y Subir deben ofrecer destino existente"
+        );
+        assert!(
+            html.contains(r#"scan-exist-row').style.display=ex?'':'none'"#),
+            "el conmutador debe mostrar la fila existente solo en modo existente"
+        );
         // API lista
         let body = client
             .get(format!("{base}/api/files"))
@@ -1651,6 +1709,96 @@ mod tests {
             .unwrap()
             .iter()
             .any(|f| f["path"] == first_path));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn api_scan_en_coleccion_existente() -> anyhow::Result<()> {
+        use iroh_blobs::store::mem::MemStore;
+        let mem = MemStore::new();
+        let store: BlobsStore = mem.into();
+        let db = Db::open_in_memory()?;
+        // Serie ya creada con Temporada 1.
+        let root = db.create_collection("series", "Frieren", "")?;
+        let t1 = db.create_collection("season", "Temporada 1", &root.id)?;
+        let (base, _h) = Gateway::serve_loopback(store, db, "scan-exist".into()).await?;
+        let client = reqwest::Client::new();
+        async fn wait_done(client: &reqwest::Client, base: &str, job: &str) -> anyhow::Result<()> {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                let t = client
+                    .get(format!("{base}/api/library/jobs/{job}"))
+                    .send()
+                    .await?
+                    .text()
+                    .await?;
+                let j: serde_json::Value = serde_json::from_str(&t)?;
+                if j["status"] == "done" || j["status"] == "done_with_errors" {
+                    return Ok(());
+                }
+                if tokio::time::Instant::now() > deadline {
+                    anyhow::bail!("timeout job: {j}");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+        // Carpeta con 2 episodios nuevos.
+        let dir = tempfile::tempdir()?;
+        for n in ["cap03.mkv", "cap04.mkv"] {
+            std::fs::write(dir.path().join(n), format!("contenido-{n}"))?;
+        }
+        let dir_s = dir.path().to_string_lossy().to_string();
+        // Escaneo directo a la temporada YA CREADA.
+        let body = client
+            .post(format!("{base}/api/library/scan-folder"))
+            .body(
+                serde_json::json!({"path": dir_s, "recursive": false,
+                    "target_collection_id": t1.id})
+                .to_string(),
+            )
+            .header("Content-Type", "application/json")
+            .send()
+            .await?
+            .text()
+            .await?;
+        let v: serde_json::Value = serde_json::from_str(&body)?;
+        assert_eq!(v["collection_id"].as_str().unwrap_or(""), root.id);
+        wait_done(&client, &base, v["job_id"].as_str().unwrap()).await?;
+        // No se creó ninguna colección nueva: sigue habiendo 1 hija con 2 items.
+        let cols: serde_json::Value = serde_json::from_str(
+            &client
+                .get(format!("{base}/api/collections"))
+                .send()
+                .await?
+                .text()
+                .await?,
+        )?;
+        assert_eq!(cols.as_array().unwrap().len(), 2);
+        let det: serde_json::Value = serde_json::from_str(
+            &client
+                .get(format!("{base}/api/collections/{}", t1.id))
+                .send()
+                .await?
+                .text()
+                .await?,
+        )?;
+        assert_eq!(det["items"].as_array().unwrap().len(), 2);
+        // La raíz con hijas como destino se rechaza (hay que elegir temporada).
+        let r = client
+            .post(format!("{base}/api/library/scan-folder"))
+            .body(serde_json::json!({"path": dir_s, "target_collection_id": root.id}).to_string())
+            .header("Content-Type", "application/json")
+            .send()
+            .await?;
+        assert_eq!(r.status(), 400);
+        // Destino inexistente también se rechaza.
+        let r = client
+            .post(format!("{base}/api/library/scan-folder"))
+            .body(serde_json::json!({"path": dir_s, "target_collection_id": "c_nope"}).to_string())
+            .header("Content-Type", "application/json")
+            .send()
+            .await?;
+        assert_eq!(r.status(), 400);
         Ok(())
     }
 
