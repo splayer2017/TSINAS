@@ -15,7 +15,7 @@ use iroh_blobs::api::blobs::{AddPathOptions, ImportMode};
 use iroh_blobs::api::Store as BlobsStore;
 use iroh_blobs::BlobFormat;
 
-use crate::db::{Db, FileRow};
+use crate::db::{Db, FileRow, FILE_KIND_FILE, FILE_KIND_MEDIA};
 use crate::policy::Policy;
 
 /// Extensiones de vídeo aceptadas en el escaneo de carpetas.
@@ -196,9 +196,75 @@ impl Library {
             tag: tag_s,
             title: String::new(),
             watched: false,
+            kind: FILE_KIND_MEDIA.to_string(),
         })?;
 
         // BLOCK-01: Publicar entrada en iroh-docs si hay un doc activo
+        if let (Some(doc), Some(author)) = (&self.doc, &self.author) {
+            let _ = doc
+                .set_hash(*author, path.as_bytes().to_vec(), tag.hash, size)
+                .await;
+        }
+
+        Ok(AddedFile {
+            path,
+            hash: hash_s,
+            size,
+            mime,
+        })
+    }
+
+    /// Añade un archivo genérico al apartado Almacenamiento (cualquier
+    /// extensión, sin filtro de vídeo). Zero-copy por path igual que
+    /// `add_file`, pero con `policy=Mirror` (descarga permitida) y
+    /// `kind=file` para que no aparezca en Biblioteca/Streaming.
+    pub async fn add_storage_file(&self, raw_path: &str) -> anyhow::Result<AddedFile> {
+        let abs = self.resolve(raw_path)?;
+        if !abs.is_file() {
+            anyhow::bail!("no es un archivo: {}", abs.display());
+        }
+        let size = std::fs::metadata(&abs)?.len();
+        if size == 0 {
+            anyhow::bail!("el archivo está vacío: {}", abs.display());
+        }
+        let name = abs
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "archivo".into());
+        let path = sanitize_filename(&name);
+
+        let tag = self
+            .store
+            .blobs()
+            .add_path_with_opts(AddPathOptions {
+                path: abs.clone(),
+                mode: ImportMode::TryReference,
+                format: BlobFormat::Raw,
+            })
+            .await?;
+        let hash_s = tag.hash.to_string();
+        let tag_s = String::from_utf8_lossy(tag.name.as_ref()).to_string();
+        let mime = guess_mime(&path);
+
+        if let Ok(Some(prev)) = self.db.get_by_path(&path) {
+            if !prev.tag.is_empty() && prev.tag != tag_s {
+                let _ = self.store.tags().delete(prev.tag.as_bytes()).await;
+            }
+        }
+
+        self.db.upsert_file(&FileRow {
+            path: path.clone(),
+            hash: hash_s.clone(),
+            size,
+            mime: mime.clone(),
+            policy: Policy::Mirror,
+            host_id: self.endpoint_id.clone(),
+            tag: tag_s,
+            title: String::new(),
+            watched: false,
+            kind: FILE_KIND_FILE.to_string(),
+        })?;
+
         if let (Some(doc), Some(author)) = (&self.doc, &self.author) {
             let _ = doc
                 .set_hash(*author, path.as_bytes().to_vec(), tag.hash, size)
@@ -287,6 +353,7 @@ impl Library {
             tag: tag_s,
             title: String::new(),
             watched: false,
+            kind: FILE_KIND_MEDIA.to_string(),
         })?;
 
         // BLOCK-01: Publicar entrada en iroh-docs si hay un doc activo
@@ -297,6 +364,61 @@ impl Library {
         }
 
         // El contenido ya quedó en el blob store; liberar el temporal.
+        let _ = std::fs::remove_file(staged);
+        Ok(AddedFile {
+            path: name,
+            hash: hash_s,
+            size,
+            mime,
+        })
+    }
+
+    /// Importa una subida del navegador/móvil al apartado Almacenamiento
+    /// (`kind=file`, `policy=Mirror`). El tope de 8 GiB se aplica en el
+    /// gateway mientras escribe el staging, aquí solo se valida no-vacío.
+    pub async fn add_storage_upload(
+        &self,
+        display_name: &str,
+        staged: &Path,
+    ) -> anyhow::Result<AddedFile> {
+        let name = sanitize_filename(display_name);
+        if !staged.is_file() {
+            anyhow::bail!("subida incompleta: temporal no encontrado");
+        }
+        let size = std::fs::metadata(staged)?.len();
+        if size == 0 {
+            anyhow::bail!("el archivo subido está vacío");
+        }
+        let tag = self.store.blobs().add_path(staged).await?;
+        let hash_s = tag.hash.to_string();
+        let tag_s = String::from_utf8_lossy(tag.name.as_ref()).to_string();
+        let mime = guess_mime(&name);
+
+        if let Ok(Some(prev)) = self.db.get_by_path(&name) {
+            if !prev.tag.is_empty() && prev.tag != tag_s {
+                let _ = self.store.tags().delete(prev.tag.as_bytes()).await;
+            }
+        }
+
+        self.db.upsert_file(&FileRow {
+            path: name.clone(),
+            hash: hash_s.clone(),
+            size,
+            mime: mime.clone(),
+            policy: Policy::Mirror,
+            host_id: self.endpoint_id.clone(),
+            tag: tag_s,
+            title: String::new(),
+            watched: false,
+            kind: FILE_KIND_FILE.to_string(),
+        })?;
+
+        if let (Some(doc), Some(author)) = (&self.doc, &self.author) {
+            let _ = doc
+                .set_hash(*author, name.as_bytes().to_vec(), tag.hash, size)
+                .await;
+        }
+
         let _ = std::fs::remove_file(staged);
         Ok(AddedFile {
             path: name,
@@ -421,6 +543,8 @@ fn sanitize_filename(raw: &str) -> String {
 }
 
 /// Determina el tipo MIME según la extensión del archivo (insensible a mayúsculas).
+/// Cubre vídeo (streaming) + tipos habituales de almacenamiento.
+/// Desconocido → `application/octet-stream`.
 pub fn guess_mime(name: &str) -> String {
     let n = name.to_lowercase();
     if n.ends_with(".mkv") {
@@ -431,10 +555,73 @@ pub fn guess_mime(name: &str) -> String {
         "video/webm"
     } else if n.ends_with(".avi") {
         "video/x-msvideo"
+    } else if n.ends_with(".mov") {
+        "video/quicktime"
+    } else if n.ends_with(".mp3") {
+        "audio/mpeg"
+    } else if n.ends_with(".ogg") || n.ends_with(".oga") {
+        "audio/ogg"
+    } else if n.ends_with(".opus") {
+        "audio/opus"
+    } else if n.ends_with(".flac") {
+        "audio/flac"
+    } else if n.ends_with(".wav") {
+        "audio/wav"
+    } else if n.ends_with(".m4a") {
+        "audio/mp4"
+    } else if n.ends_with(".jpg") || n.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if n.ends_with(".png") {
+        "image/png"
+    } else if n.ends_with(".gif") {
+        "image/gif"
+    } else if n.ends_with(".webp") {
+        "image/webp"
+    } else if n.ends_with(".svg") {
+        "image/svg+xml"
+    } else if n.ends_with(".pdf") {
+        "application/pdf"
+    } else if n.ends_with(".zip") {
+        "application/zip"
+    } else if n.ends_with(".tar") {
+        "application/x-tar"
+    } else if n.ends_with(".gz") || n.ends_with(".tgz") {
+        "application/gzip"
+    } else if n.ends_with(".7z") {
+        "application/x-7z-compressed"
+    } else if n.ends_with(".rar") {
+        "application/vnd.rar"
+    } else if n.ends_with(".epub") {
+        "application/epub+zip"
+    } else if n.ends_with(".cbz") {
+        "application/vnd.comicbook+zip"
+    } else if n.ends_with(".cbr") {
+        "application/vnd.comicbook-rar"
+    } else if n.ends_with(".iso") {
+        "application/x-iso9660-image"
+    } else if n.ends_with(".txt") || n.ends_with(".md") || n.ends_with(".log") {
+        "text/plain; charset=utf-8"
+    } else if n.ends_with(".json") {
+        "application/json"
+    } else if n.ends_with(".csv") {
+        "text/csv"
+    } else if n.ends_with(".html") || n.ends_with(".htm") {
+        "text/html"
     } else {
         "application/octet-stream"
     }
     .to_string()
+}
+
+/// ¿El navegador puede previsualizar este MIME sin descargar?
+/// Imágenes, PDF, texto plano y audio van inline; resto → attachment.
+pub fn is_previewable_mime(mime: &str) -> bool {
+    let m = mime.to_lowercase();
+    m.starts_with("image/")
+        || m.starts_with("audio/")
+        || m.starts_with("text/")
+        || m == "application/pdf"
+        || m == "application/json"
 }
 
 // ---------------------------------------------------------------------------
@@ -597,6 +784,38 @@ mod tests {
         let f = fuera.path().join("a.mkv");
         std::fs::write(&f, b"x")?;
         assert!(lib.add_file(&f.to_string_lossy(), None).await.is_err());
+        assert!(lib.add_storage_file(&f.to_string_lossy()).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn storage_acepta_cualquier_archivo() -> anyhow::Result<()> {
+        let (lib, dir) = mem_lib();
+        for (name, mime) in [
+            ("manual.pdf", "application/pdf"),
+            ("fotos.zip", "application/zip"),
+            ("notas.txt", "text/plain; charset=utf-8"),
+            ("imagen.jpg", "image/jpeg"),
+            ("binario.raro", "application/octet-stream"),
+        ] {
+            let f = dir.path().join(name);
+            std::fs::write(&f, format!("contenido-{name}"))?;
+            let added = lib.add_storage_file(&f.to_string_lossy()).await?;
+            assert_eq!(added.path, name);
+            assert_eq!(added.mime, mime);
+            let row = lib.db.get_by_path(name)?.expect("debe estar en db");
+            assert_eq!(row.kind, FILE_KIND_FILE);
+            assert!(row.policy.allows_download());
+        }
+        // Separación por kind: streaming vacío, storage con 5.
+        assert!(lib.db.list_files_by_kind(FILE_KIND_MEDIA)?.is_empty());
+        assert_eq!(lib.db.list_files_by_kind(FILE_KIND_FILE)?.len(), 5);
+        // guess_mime + preview.
+        assert_eq!(guess_mime("a.PDF"), "application/pdf");
+        assert!(is_previewable_mime("application/pdf"));
+        assert!(is_previewable_mime("image/png"));
+        assert!(!is_previewable_mime("application/zip"));
+        assert!(!is_previewable_mime("application/octet-stream"));
         Ok(())
     }
 

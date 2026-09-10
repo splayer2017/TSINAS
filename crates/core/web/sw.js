@@ -1,7 +1,7 @@
-// SW mínimo: cachea solo la shell (/, manifest). Nunca /api/* ni /stream/*.
+// SW mínimo: cachea solo la shell (/, manifest). Nunca /api/* ni /stream/* ni /download/*.
 // Bump de versión en cada cambio de UI para forzar actualización en clientes.
 const SHELL = ["/", "/manifest.json"];
-const CACHE = "baul-v5";
+const CACHE = "baul-v6";
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
 });
@@ -15,6 +15,6 @@ self.addEventListener("activate", (e) =>
 );
 self.addEventListener("fetch", (e) => {
   const u = new URL(e.request.url);
-  if (u.pathname.startsWith("/stream/") || u.pathname.startsWith("/api/")) return; // red, sin caché
+  if (u.pathname.startsWith("/stream/") || u.pathname.startsWith("/download/") || u.pathname.startsWith("/api/")) return; // red, sin caché
   e.respondWith(caches.match(e.request).then((h) => h || fetch(e.request)));
 });

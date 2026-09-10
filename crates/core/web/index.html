@@ -142,6 +142,24 @@ video{width:100%;background:#000;max-height:62vh;display:block}
 #toast div{background:var(--bg2);border:1px solid var(--line2);padding:10px 14px;font-size:13px}
 label.check{display:flex;gap:8px;align-items:center;font-size:13px;color:var(--mut)}
 .empty{border:1px dashed var(--line2);padding:26px;text-align:center;color:var(--mut);font-size:14px}
+/* Apartados principales + almacenamiento */
+nav.main{display:flex;gap:8px;padding:0 0 8px}
+nav.main button{flex:1;background:transparent;border:1px solid var(--line2);color:var(--mut);border-radius:var(--r);padding:12px;font-size:15px;font-weight:700;cursor:pointer;letter-spacing:.2px}
+nav.main button[aria-selected="true"]{background:var(--acc);color:var(--acc-ink);border-color:var(--acc)}
+nav.sub{display:flex;gap:8px;padding:0 0 12px}
+nav.sub button{flex:1;background:transparent;border:1px solid var(--line2);color:var(--mut);border-radius:var(--r);padding:10px;font-size:13.5px;font-weight:600;cursor:pointer}
+nav.sub button[aria-selected="true"]{background:var(--card2);color:var(--txt);border-color:var(--acc)}
+.mainview{display:none}.mainview.active{display:block}
+#soverlay{display:none;position:fixed;inset:0;z-index:50;background:rgba(4,5,7,.88);padding:16px}
+#soverlay.open{display:grid;place-items:center}
+#somodal{width:min(920px,100%);max-height:90vh;overflow:auto;background:var(--bg2);border:1px solid var(--line2)}
+#somodal .mhead{display:flex;gap:10px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--line)}
+#somodal .mhead .t{flex:1;font-weight:650;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#somodal .mbody{padding:14px}
+#somodal img{max-width:100%;display:block;margin:0 auto}
+#somodal audio{width:100%}
+#somodal pre{white-space:pre-wrap;word-break:break-all;font-size:12.5px;color:var(--txt);max-height:55vh;overflow:auto;background:var(--bg);padding:12px;border:1px solid var(--line)}
+#somodal embed{width:100%;height:62vh;background:#fff}
 </style>
 </head>
 <body>
@@ -151,13 +169,18 @@ label.check{display:flex;gap:8px;align-items:center;font-size:13px;color:var(--m
     <h1>TSINAS<small id="info">conectando…</small></h1>
     <input id="search" type="text" placeholder="Buscar…" oninput="render()">
   </div>
-  <nav class="tabs" role="tablist">
+  <nav class="main" role="tablist" aria-label="Apartados">
+    <button id="tab-streaming" aria-selected="true" onclick="showMain('streaming')">Streaming</button>
+    <button id="tab-storage" aria-selected="false" onclick="showMain('storage')">Almacenamiento</button>
+  </nav>
+  <nav class="sub" role="tablist" id="stream-sub" aria-label="Streaming">
     <button id="tab-list" aria-selected="true" onclick="show('list')">Biblioteca</button>
     <button id="tab-cols" aria-selected="false" class="ghost" onclick="show('cols')">Colecciones</button>
     <button id="tab-add" aria-selected="false" class="ghost" onclick="show('add')">Añadir</button>
   </nav>
 </div></header>
 <main>
+<div id="view-streaming" class="mainview active">
 <!-- ============ BIBLIOTECA ============ -->
 <section id="view-list" class="view active">
   <div class="toolbar">
@@ -246,6 +269,45 @@ label.check{display:flex;gap:8px;align-items:center;font-size:13px;color:var(--m
     <p class="hint">Solo para traer archivos desde el móvil u otro equipo. En el PC anfitrión usa Escanear (tope 8 GiB por archivo).</p>
   </div>
 </section>
+</div><!-- /view-streaming -->
+<!-- ============ ALMACENAMIENTO ============ -->
+<div id="view-storage" class="mainview">
+  <section id="view-slist" class="view active">
+    <div class="toolbar">
+      <button id="sreload" class="dim" onclick="srefresh()">Recargar</button>
+      <span class="chip" id="scount"></span>
+      <span class="chip">P2P tailnet · descarga directa /download/&lt;hash&gt; · reanuda con Range</span>
+    </div>
+    <div class="row">
+      <input type="text" id="ssearch" placeholder="Buscar en almacenamiento…" oninput="srender()" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="err" id="serr"></div>
+    <div class="ok" id="sok"></div>
+    <div class="grid" id="slist"></div>
+    <p class="hint">Cualquier archivo (pdf, zip, iso, fotos, …) vinculado por ruta del host. <b>Descargar</b> lo transmite PC → este dispositivo por la tailnet; <b>Vista previa</b> solo para imagen/PDF/texto/audio (<b>/download/&lt;hash&gt;?inline=1</b>).</p>
+  </section>
+  <section id="view-sadd" class="view active">
+    <div class="card">
+      <h2>Vincular archivo por ruta del host <span class="badge badge-zc">Zero-Copy · sin límite</span></h2>
+      <div class="row">
+        <input type="text" id="storagepath" placeholder="/home/uriel/Documentos/manual.pdf" autocomplete="off" spellcheck="false">
+        <button id="btn-sadd" onclick="saddFile()">Vincular</button>
+      </div>
+      <p class="hint">No copia ni mueve nada: indexa en su sitio y lo publica para descargar desde tus otros dispositivos.</p>
+    </div>
+    <div class="card">
+      <h2>Subir desde este dispositivo <span class="badge badge-copy">Copia al host · tope 8 GiB</span></h2>
+      <div class="row">
+        <input type="file" id="storageinput" multiple>
+        <button id="btn-supload" onclick="suploadFiles()">Subir</button>
+      </div>
+      <div id="supbox" style="display:none">
+        <div class="row"><progress id="supbar" max="100" value="0"></progress><span class="hint" id="suptxt"></span></div>
+      </div>
+      <p class="hint">Para traer archivos desde el móvil u otro equipo al almacenamiento del host (tope 8 GiB por archivo).</p>
+    </div>
+  </section>
+</div>
 </main>
 <!-- ============ PLAYER ============ -->
 <div id="overlay" onclick="if(event.target===this)closePlayer()">
@@ -255,11 +317,20 @@ label.check{display:flex;gap:8px;align-items:center;font-size:13px;color:var(--m
     <div class="mfoot"><a id="mvlc" href="#"><button class="ghost small">Abrir en VLC</button></a><button class="dim small" onclick="copyUrl(cur,event)">Copiar URL</button><span class="hint" id="mnote"></span></div>
   </div>
 </div>
+<!-- ============ STORAGE PREVIEW ============ -->
+<div id="soverlay" onclick="if(event.target===this)sclosePreview()">
+  <div id="somodal">
+    <div class="mhead"><div class="t" id="smtitle"></div><button class="dim small" onclick="sclosePreview()">Cerrar</button></div>
+    <div class="mbody" id="smbody"></div>
+    <div class="mfoot" style="display:flex;gap:8px;padding:12px 14px;flex-wrap:wrap;align-items:center"><a id="smdown" href="#"><button class="small">Descargar</button></a><button class="dim small" onclick="scopyLink(event)">Copiar enlace</button><span class="hint">Vista previa: imagen / PDF / texto / audio. El resto solo se descarga.</span></div>
+  </div>
+</div>
 <div id="toast"></div>
 <script>
 const $=s=>document.querySelector(s);
-let FILES=[],COLS=[],cur=null,curDetail=null,expandedRoot=null,expandedKid=null,DETAILCACHE={};
-function show(w){for(const v of ['list','cols','add']){$('#view-'+v).classList.toggle('active',v===w);$('#tab-'+v).setAttribute('aria-selected',v===w?'true':'false');}if(w==='cols'||w==='add')loadCols();}
+let FILES=[],COLS=[],SFILES=[],cur=null,scur=null,curDetail=null,expandedRoot=null,expandedKid=null,DETAILCACHE={};
+function showMain(m){const sm=m==='storage';$('#view-streaming').classList.toggle('active',!sm);$('#view-storage').classList.toggle('active',sm);$('#tab-streaming').setAttribute('aria-selected',!sm?'true':'false');$('#tab-storage').setAttribute('aria-selected',sm?'true':'false');const sub=$('#stream-sub');if(sub)sub.style.display=sm?'none':'';if(sm)srefresh();}
+function show(w){showMain('streaming');for(const v of ['list','cols','add']){$('#view-'+v).classList.toggle('active',v===w);$('#tab-'+v).setAttribute('aria-selected',v===w?'true':'false');}if(w==='cols'||w==='add')loadCols();}
 function toast(m){const d=document.createElement('div');d.textContent=m;$('#toast').appendChild(d);setTimeout(()=>d.remove(),2600);}
 function err(m){const e=$('#err');e.style.display='block';e.textContent=m;}
 function clear(){const e=$('#err');e.style.display='none';}
@@ -307,8 +378,8 @@ function refreshAddLeaf(p){const rs=$('#'+p+'-root'),ls=$('#'+p+'-leaf'),ni=$('#
 async function ensureAddTarget(p){const rs=$('#'+p+'-root');if(!rs)return '';const rid=rs.value;if(!rid)return '';const root=COLS.find(c=>c.id===rid);if(!root)return '';const ni=$('#'+p+'-new-season');const nt=(ni?ni.value:'').trim();if(nt){if(root.kind==='movie')throw new Error('una película no admite temporadas');const r=await fetch('/api/collections/'+rid+'/children',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({kind:'season',title:nt})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));DETAILCACHE={};await loadCols(true);fillAddTargets();if(ni)ni.value='';return j.id;}const kids=kidsOf(rid);if(kids.length){const ls=$('#'+p+'-leaf');const lid=ls?ls.value:'';if(!lid)throw new Error('elige una temporada dentro de la serie');return lid;}return rid;}
 async function attachToCollection(cid,filePath){const r=await fetch('/api/collections/'+cid+'/items',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file_path:filePath,season:'',label:'',pos:0})});if(!r.ok){const j=await r.json().catch(()=>({}));throw new Error(j.error||('HTTP '+r.status));}}
 async function copyUrl(f,ev){if(ev)ev.preventDefault();const u=streamUrl(f||cur||{hash:''});try{await navigator.clipboard.writeText(u);toast('URL copiada para VLC');}catch(e){prompt('Copia la URL para VLC:',u);}}
-async function info(){try{const r=await fetch('/api/info');const j=await r.json();$('#info').textContent='nodo '+j.endpoint_id.slice(0,12)+'… · '+j.files+' archivo(s)';}catch(e){$('#info').textContent='sin conexión con el host';}}
-async function refresh(){await info();await files();await loadCols(true);}
+async function info(){try{const r=await fetch('/api/info');const j=await r.json();const m=(j.media!=null?j.media:j.files);const s=(j.storage!=null?j.storage:0);$('#info').textContent='nodo '+j.endpoint_id.slice(0,12)+'… · '+m+' vídeo(s) · '+s+' archivo(s)';}catch(e){$('#info').textContent='sin conexión con el host';}}
+async function refresh(){await info();await files();await sfiles(true);await loadCols(true);}
 async function files(){clear();try{const r=await fetch('/api/files');if(!r.ok)throw new Error('HTTP '+r.status);FILES=await r.json();render();}catch(e){err('No se pudo cargar la lista: '+e.message);}}
 function render(){
   const q=($('#search').value||'').toLowerCase();
@@ -658,13 +729,57 @@ async function addFile(){aclear();const p=$('#filepath').value.trim();if(!p){aer
 async function scanFolder(){aclear();const p=$('#folderpath').value.trim();if(!p){aerr('Escribe la ruta de la carpeta en el servidor.');return;}$('#btn-scan').disabled=true;$('#jobbox').style.display='none';try{const body={path:p,recursive:$('#recursive').checked};if($('#scan-mode')&&$('#scan-mode').value==='existing'){let target='';try{target=await ensureAddTarget('scan');}catch(e){aerr(e.message);$('#btn-scan').disabled=false;return;}if(!target){aerr('Elige la serie/temporada destino o vuelve al modo «Nueva serie».');$('#btn-scan').disabled=false;return;}body.target_collection_id=target;}else{body.collection_title=$('#scan-col').value.trim();body.collection_kind=$('#scan-kind').value;body.season=$('#scan-season').value.trim();}const r=await fetch('/api/library/scan-folder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));if(j.found===0){aok('Carpeta vacía: no hay vídeos.');return;}if(j.collection_id){aok('Escaneando y agrupando en la colección…');}$('#jobbox').style.display='block';pollJob(j.job_id);}catch(e){aerr('No se pudo escanear: '+e.message);$('#btn-scan').disabled=false;}}
 async function pollJob(id){try{const r=await fetch('/api/library/jobs/'+id);const j=await r.json();const pct=j.total?Math.round(j.done/j.total*100):100;$('#jobbar').value=pct;$('#jobtxt').textContent=j.done+'/'+j.total+' · '+j.status;$('#joblog').textContent=(j.errors||[]).join('\n');if(j.status==='running'){setTimeout(()=>pollJob(id),1000);return;}const ok=(j.added||[]).length;aok('Escaneo '+j.status+': '+ok+' añadido(s)'+(j.errors.length?' · '+j.errors.length+' con error (ver detalle)':''));DETAILCACHE={};refresh();}catch(e){aerr('Sin estado del escaneo: '+e.message);}finally{if($('#jobtxt').textContent.indexOf('running')<0)$('#btn-scan').disabled=false;}}
 async function uploadFiles(){aclear();const inp=$('#fileinput');if(!inp.files.length){aerr('Elige al menos un archivo con el selector.');return;}$('#btn-upload').disabled=true;$('#upbox').style.display='block';let target='';try{target=await ensureAddTarget('up');}catch(e){aerr(e.message);$('#btn-upload').disabled=false;$('#upbox').style.display='none';return;}let ok=0,grouped=0;const errs=[],merrs=[];for(let i=0;i<inp.files.length;i++){const f=inp.files[i];$('#uptxt').textContent=(i+1)+'/'+inp.files.length+' · '+f.name;$('#upbar').value=Math.round(i/inp.files.length*100);const fd=new FormData();fd.append('file',f,f.name);try{const r=await fetch('/api/library/upload',{method:'POST',body:fd});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));ok++;if(target){try{await attachToCollection(target,j.path);grouped++;}catch(e2){merrs.push(f.name+': '+e2.message);}}}catch(e){errs.push(f.name+': '+e.message);}}$('#upbar').value=100;$('#uptxt').textContent=inp.files.length+'/'+inp.files.length;inp.value='';DETAILCACHE={};if(errs.length)aerr('Subidos '+ok+' de '+inp.files.length+'. Errores: '+errs.join(' | '));else if(target)aok('Subido(s): '+ok+' archivo(s)'+(grouped===ok?' y agrupados.':' — agrupados '+grouped+' de '+ok+(merrs.length?'. No agrupados: '+merrs.join(' | '):'')));else aok('Subido(s): '+ok+' archivo(s) en la lista.');refresh();$('#btn-upload').disabled=false;}
+/* ---- Almacenamiento: cualquier archivo + descarga P2P tailnet ---- */
+function downloadUrl(f,inline){return location.origin+'/download/'+f.hash+(inline?'?inline=1':'');}
+function sPreviewable(f){const m=(f.mime||'').toLowerCase();return m.startsWith('image/')||m.startsWith('audio/')||m.startsWith('text/')||m==='application/pdf'||m==='application/json';}
+function serr(m){const e=$('#serr');e.style.display='block';e.textContent=m;}
+function sclear(){const e=$('#serr');e.style.display='none';const o=$('#sok');if(o)o.style.display='none';}
+function sok(m){const e=$('#sok');e.style.display='block';e.textContent=m;}
+async function srefresh(){await sfiles();}
+async function sfiles(silent){sclear();try{const r=await fetch('/api/storage');if(!r.ok)throw new Error('HTTP '+r.status);SFILES=await r.json();srender();}catch(e){if(!silent)serr('No se pudo cargar almacenamiento: '+e.message);else{const box=$('#slist');if(box&&!SFILES.length)box.innerHTML='';}}}
+function srender(){
+  const q=(($('#ssearch')&&$('#ssearch').value)||'').toLowerCase();
+  const box=$('#slist');if(!box)return;box.innerHTML='';
+  const items=SFILES.filter(f=>(disp(f)+' '+(f.path||'')+' '+(f.mime||'')).toLowerCase().includes(q)).sort((a,b)=>disp(a).localeCompare(disp(b),undefined,{numeric:true}));
+  const c=$('#scount');if(c)c.textContent=items.length+' / '+SFILES.length;
+  if(!items.length){box.innerHTML='<div class="empty">Vacío — vincula un archivo por su ruta del host o sube desde este dispositivo (tope 8 GiB).</div>';return;}
+  for(const f of items)box.appendChild(scard(f));
+}
+function scard(f){
+  const d=document.createElement('div');d.className='item';
+  const th=document.createElement('div');th.className='thumb';
+  const m=(f.mime||'').toLowerCase();
+  th.textContent=m.startsWith('image/')?'IMG':m==='application/pdf'?'PDF':m.startsWith('audio/')?'AUD':m.startsWith('text/')?'TXT':(f.path||'?').split('.').pop().slice(0,4).toUpperCase();
+  d.appendChild(th);
+  const b=document.createElement('div');b.className='body';d.appendChild(b);
+  const t=document.createElement('div');t.className='t';t.textContent=disp(f);b.appendChild(t);
+  const meta=document.createElement('div');meta.className='m';meta.textContent=(f.path||'')+' · '+fmt(f.size)+' · '+f.mime;b.appendChild(meta);
+  const a=document.createElement('div');a.className='actions';b.appendChild(a);
+  if(sPreviewable(f)){const pv=document.createElement('button');pv.className='small';pv.textContent='Vista previa';pv.onclick=()=>spreview(f);a.appendChild(pv);}
+  const dl=document.createElement('a');dl.href=downloadUrl(f,false);dl.setAttribute('download','');const db=document.createElement('button');db.className='small';db.textContent='Descargar';dl.appendChild(db);a.appendChild(dl);
+  const cp=document.createElement('button');cp.className='dim small';cp.textContent='Copiar enlace';cp.onclick=(ev)=>scopyUrl(f,ev);a.appendChild(cp);
+  const q=document.createElement('button');q.className='danger small';q.textContent='Quitar';q.onclick=()=>sremove(f,q);a.appendChild(q);
+  const tools=document.createElement('div');tools.className='tools';b.appendChild(tools);
+  const rn=document.createElement('input');rn.type='text';rn.placeholder='Renombrar título visible…';rn.value=(f.title||'');rn.style.maxWidth='190px';tools.appendChild(rn);
+  const rb=document.createElement('button');rb.className='dim small';rb.textContent='Guardar';rb.onclick=()=>srename(f,rn.value,rb);tools.appendChild(rb);
+  return d;
+}
+async function saddFile(){sclear();const p=$('#storagepath').value.trim();if(!p){serr('Escribe la ruta del archivo en el servidor.');return;}$('#btn-sadd').disabled=true;try{const r=await fetch('/api/storage/add-file',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));$('#storagepath').value='';sok('Vinculado: '+j.path+' ('+fmt(j.size)+')');srefresh();info();}catch(e){serr('No se pudo vincular: '+e.message);}finally{$('#btn-sadd').disabled=false;}}
+async function suploadFiles(){sclear();const inp=$('#storageinput');if(!inp.files.length){serr('Elige al menos un archivo.');return;}$('#btn-supload').disabled=true;$('#supbox').style.display='block';let ok=0;const errs=[];for(let i=0;i<inp.files.length;i++){const f=inp.files[i];$('#suptxt').textContent=(i+1)+'/'+inp.files.length+' · '+f.name;$('#supbar').value=Math.round(i/inp.files.length*100);const fd=new FormData();fd.append('file',f,f.name);try{const r=await fetch('/api/storage/upload',{method:'POST',body:fd});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));ok++;}catch(e){errs.push(f.name+': '+e.message);}}$('#supbar').value=100;$('#suptxt').textContent=inp.files.length+'/'+inp.files.length;inp.value='';if(errs.length)serr('Subidos '+ok+' de '+inp.files.length+'. Errores: '+errs.join(' | '));else sok('Subido(s): '+ok+' archivo(s) al almacenamiento.');srefresh();info();$('#btn-supload').disabled=false;}
+async function sremove(f,btn){if(!confirm('¿Quitar "'+disp(f)+'" del almacenamiento? Libera espacio en ~1 min. No borra tu original.'))return;btn.disabled=true;try{const r=await fetch('/api/files/'+f.hash,{method:'DELETE'});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));sok('Quitado');await sfiles();await info();}catch(e){serr('No se pudo quitar: '+e.message);}finally{btn.disabled=false;}}
+async function srename(f,title,btn){btn.disabled=true;try{const r=await fetch('/api/files',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:f.path,title})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('HTTP '+r.status));f.title=title;toast('Título guardado');srender();}catch(e){toast('No se pudo renombrar: '+e.message);}finally{btn.disabled=false;}}
+async function scopyUrl(f,ev){if(ev)ev.preventDefault();const u=location.origin+'/download/'+f.hash;try{await navigator.clipboard.writeText(u);toast('Enlace de descarga copiado');}catch(e){prompt('Copia el enlace:',u);}}
+function spreview(f){scur=f;const body=$('#smbody');body.innerHTML='';$('#smtitle').textContent=disp(f);$('#smdown').href=downloadUrl(f,false);const m=(f.mime||'').toLowerCase();const url=downloadUrl(f,true);if(m.startsWith('image/')){const im=document.createElement('img');im.src=url;im.alt='';body.appendChild(im);}else if(m.startsWith('audio/')){const au=document.createElement('audio');au.controls=true;au.src=url;body.appendChild(au);}else if(m==='application/pdf'){const em=document.createElement('embed');em.type='application/pdf';em.src=url;body.appendChild(em);}else if(m.startsWith('text/')||m==='application/json'){const pre=document.createElement('pre');pre.textContent='Cargando…';body.appendChild(pre);fetch(url).then(r=>r.text()).then(t=>{pre.textContent=t.slice(0,200000);}).catch(e=>{pre.textContent='No se pudo previsualizar: '+e.message;});}else{const p=document.createElement('p');p.className='hint';p.textContent='Sin vista previa para este tipo — usa Descargar.';body.appendChild(p);}$('#soverlay').classList.add('open');}
+function sclosePreview(){$('#soverlay').classList.remove('open');$('#smbody').innerHTML='';scur=null;}
+async function scopyLink(ev){if(ev)ev.preventDefault();if(!scur)return;const u=location.origin+'/download/'+scur.hash;try{await navigator.clipboard.writeText(u);toast('Enlace copiado');}catch(e){prompt('Copia el enlace:',u);}}
 /* ---- Player híbrido: web + VLC siempre ---- */
 function play(f){cur=f;clear();const v=$('#v');$('#overlay').classList.add('open');$('#mtitle').textContent=disp(f);$('#mvlc').href=vlcIntent(f);const mkv=isMkv(f);$('#mnote').textContent=mkv?'MKV: si la web no lo abre, usa VLC (botón siempre disponible).':'MP4/WebM: reproducción nativa.';v.src='/stream/'+f.hash;v.play().catch(()=>{});}
 function closePlayer(){const v=$('#v');v.pause();v.removeAttribute('src');v.load();$('#overlay').classList.remove('open');cur=null;}
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeMenus();closePlayer();}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeMenus();closePlayer();sclosePreview();}});
 document.addEventListener('click',()=>closeMenus());
 $('#v').addEventListener('error',()=>{const v=$('#v');err('Error de reproducción (código '+(v.error?v.error.code:'?')+'). Prueba Abrir en VLC — la URL es la misma.');});
 $('#reload').onclick=()=>refresh();
+const _sr=$('#sreload');if(_sr)_sr.onclick=()=>srefresh();
 if('serviceWorker' in navigator){navigator.serviceWorker.register('/sw.js').catch(()=>{});}
 refresh();
 </script>

@@ -17,8 +17,8 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 
-use crate::db::Db;
-use crate::library::{display_base_for, Jobs, Library};
+use crate::db::{Db, FILE_KIND_FILE, FILE_KIND_MEDIA};
+use crate::library::{display_base_for, is_previewable_mime, Jobs, Library};
 
 /// Estado compartido del gateway: streaming + UI web + API (tailnet privada).
 #[derive(Clone)]
@@ -86,6 +86,8 @@ impl Gateway {
             .route("/library/scan-folder", post(api_scan_folder))
             .route("/library/jobs/:id", get(api_job))
             .route("/files/:hash", delete(api_remove_file))
+            .route("/storage", get(api_storage_list))
+            .route("/storage/add-file", post(api_storage_add_file))
             .route(
                 "/collections",
                 get(api_collections).post(api_create_collection),
@@ -115,8 +117,10 @@ impl Gateway {
             .route("/health", get(health))
             .nest("/api", api_routes)
             .route("/api/library/upload", post(api_upload))
+            .route("/api/storage/upload", post(api_storage_upload))
             .route("/posters/:file", get(serve_poster))
             .route("/stream/:hash", get(stream).head(stream_head))
+            .route("/download/:hash", get(download).head(download_head))
             // Sin límite global de 2 MB: la subida de vídeos lo necesita.
             // `api_upload` impone su propio tope (8 GiB) mientras escribe.
             .layer(DefaultBodyLimit::disable())
@@ -332,6 +336,35 @@ async fn api_add_file(
             Json(json!({"error": e.to_string()})),
         )
             .into_response(),
+    }
+}
+
+/// POST /api/storage/add-file {path} — vincula cualquier archivo del host
+/// al apartado Almacenamiento (zero-copy, sin límite de tamaño ni filtro
+/// de extensión). Respeta `media_roots` igual que streaming.
+async fn api_storage_add_file(
+    State(state): State<Arc<Gateway>>,
+    Json(req): Json<AddFileReq>,
+) -> impl IntoResponse {
+    match state.library.add_storage_file(&req.path).await {
+        Ok(a) => (
+            StatusCode::OK,
+            Json(json!({"path": a.path, "hash": a.hash, "size": a.size, "mime": a.mime})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/storage — lista solo archivos de almacenamiento (`kind=file`).
+async fn api_storage_list(State(state): State<Arc<Gateway>>) -> impl IntoResponse {
+    match state.db.list_files_by_kind(FILE_KIND_FILE) {
+        Ok(rows) => (StatusCode::OK, Json(rows)).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")).into_response(),
     }
 }
 
@@ -1099,6 +1132,113 @@ async fn api_upload(
         .into_response()
 }
 
+/// POST /api/storage/upload (multipart, campo `file`) — subida directa
+/// al apartado Almacenamiento (cualquier tipo, tope 8 GiB).
+/// Reutiliza el mismo staging persistente + guardia RAII que streaming.
+async fn api_storage_upload(
+    State(state): State<Arc<Gateway>>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    const MAX_UPLOAD: u64 = 8 * 1024 * 1024 * 1024;
+    let staging_dir = state.library.staging_dir();
+    if let Err(e) = tokio::fs::create_dir_all(staging_dir).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("no se pudo preparar la subida: {e}")})),
+        )
+            .into_response();
+    }
+    while let Ok(Some(mut field)) = multipart.next_field().await {
+        let name = field
+            .file_name()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "archivo".into());
+        if field.name() != Some("file") {
+            continue;
+        }
+
+        static STORAGE_UPLOAD_COUNTER: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(1);
+        let count = STORAGE_UPLOAD_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let safe_name = PathBuf::from(&name)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "archivo".into());
+        let staged_path = staging_dir.join(format!("storage-{now}-{count}-{safe_name}"));
+        let staged = crate::library::TempStagedFile::new(staged_path);
+
+        let mut out = match tokio::fs::File::create(staged.path()).await {
+            Ok(f) => f,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("no se pudo recibir la subida: {e}")})),
+                )
+                    .into_response();
+            }
+        };
+        let mut written: u64 = 0;
+        loop {
+            match field.chunk().await {
+                Ok(Some(chunk)) => {
+                    written += chunk.len() as u64;
+                    if written > MAX_UPLOAD {
+                        return (
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            Json(json!({"error": "archivo demasiado grande (tope 8 GiB)"})),
+                        )
+                            .into_response();
+                    }
+                    use tokio::io::AsyncWriteExt;
+                    if let Err(e) = out.write_all(&chunk).await {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": format!("error al guardar la subida: {e}")})),
+                        )
+                            .into_response();
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": format!("subida interrumpida: {e}")})),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        let _ = out.flush().await;
+        drop(out);
+        match state.library.add_storage_upload(&name, staged.path()).await {
+            Ok(a) => {
+                staged.commit();
+                return (
+                    StatusCode::OK,
+                    Json(json!({"path": a.path, "hash": a.hash, "size": a.size, "mime": a.mime})),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response();
+            }
+        }
+    }
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"error": "falta el campo `file` (multipart/form-data)"})),
+    )
+        .into_response()
+}
+
 /// GET /api/library/jobs/:id — progreso del escaneo (lectura, abierto).
 async fn api_job(State(state): State<Arc<Gateway>>, Path(id): Path<String>) -> impl IntoResponse {
     match state.jobs.get(&id) {
@@ -1122,13 +1262,35 @@ async fn api_job(State(state): State<Arc<Gateway>>, Path(id): Path<String>) -> i
     }
 }
 
+/// Parsea un hash de blob sin panicar.
+/// `Hash::from_str` acepta hex (64) o base32-nopad (52); con otras
+/// longitudes `data-encoding` puede panicar en vez de devolver Err,
+/// así que pre-validamos longitud + alfabeto y devolvemos 400.
+fn parse_blob_hash(s: &str) -> Option<Hash> {
+    if s.len() == 64 {
+        if !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+    } else if s.len() == 52 {
+        if !s
+            .bytes()
+            .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'2'..=b'7'))
+        {
+            return None;
+        }
+    } else {
+        return None;
+    }
+    Hash::from_str(s).ok()
+}
+
 /// DELETE /api/files/:hash — quita de la lista y des-pinea.
 /// Nunca borra el archivo original del usuario, solo la copia del store.
 async fn api_remove_file(
     State(state): State<Arc<Gateway>>,
     Path(hash_s): Path<String>,
 ) -> impl IntoResponse {
-    if Hash::from_str(&hash_s).is_err() {
+    if parse_blob_hash(&hash_s).is_none() {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "hash inválido"})),
@@ -1172,21 +1334,26 @@ async fn sw() -> impl IntoResponse {
     ([(header::CONTENT_TYPE, "application/javascript")], SW_JS)
 }
 
-/// Lista de archivos marcados para transmitir (proyección SQLite local).
+/// Lista de vídeos del apartado Streaming (`kind=media`).
+/// Almacenamiento va en `GET /api/storage` para no mezclar.
 async fn api_files(State(state): State<Arc<Gateway>>) -> impl IntoResponse {
-    match state.db.list_files() {
+    match state.db.list_files_by_kind(FILE_KIND_MEDIA) {
         Ok(rows) => (StatusCode::OK, Json(rows)).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")).into_response(),
     }
 }
 
 async fn api_info(State(state): State<Arc<Gateway>>) -> impl IntoResponse {
-    let files = state.db.list_files().map(|v| v.len()).unwrap_or(0);
+    let all = state.db.list_files().unwrap_or_default();
+    let media = all.iter().filter(|r| r.kind != FILE_KIND_FILE).count();
+    let storage = all.iter().filter(|r| r.kind == FILE_KIND_FILE).count();
     (
         StatusCode::OK,
         Json(json!({
             "endpoint_id": state.endpoint_id,
-            "files": files,
+            "files": all.len(),
+            "media": media,
+            "storage": storage,
             "version": env!("CARGO_PKG_VERSION"),
         })),
     )
@@ -1216,11 +1383,8 @@ async fn stream_head(
     State(state): State<Arc<Gateway>>,
     Path(hash_s): Path<String>,
 ) -> impl IntoResponse {
-    let hash = match Hash::from_str(&hash_s) {
-        Ok(h) => h,
-        Err(_) => {
-            return (StatusCode::BAD_REQUEST, "hash inválido").into_response();
-        }
+    let Some(hash) = parse_blob_hash(&hash_s) else {
+        return (StatusCode::BAD_REQUEST, "hash inválido").into_response();
     };
     if !state.store.blobs().has(hash).await.unwrap_or(false) {
         return (StatusCode::NOT_FOUND, "blob no disponible en este nodo").into_response();
@@ -1255,11 +1419,8 @@ async fn stream(
     Path(hash_s): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let hash = match Hash::from_str(&hash_s) {
-        Ok(h) => h,
-        Err(_) => {
-            return (StatusCode::BAD_REQUEST, "hash inválido").into_response();
-        }
+    let Some(hash) = parse_blob_hash(&hash_s) else {
+        return (StatusCode::BAD_REQUEST, "hash inválido").into_response();
     };
     if !state.store.blobs().has(hash).await.unwrap_or(false) {
         return (StatusCode::NOT_FOUND, "blob no disponible en este nodo").into_response();
@@ -1299,6 +1460,163 @@ async fn stream(
         header::CONTENT_TYPE,
         mime.parse()
             .unwrap_or_else(|_| "application/octet-stream".parse().unwrap()),
+    );
+
+    if headers.contains_key(header::RANGE) {
+        resp_headers.insert(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{total}").parse().unwrap(),
+        );
+        (StatusCode::PARTIAL_CONTENT, resp_headers, body).into_response()
+    } else {
+        (StatusCode::OK, resp_headers, body).into_response()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DownloadQuery {
+    #[serde(default)]
+    inline: Option<String>,
+}
+
+/// Nombre seguro para `Content-Disposition`: sin comillas/saltos, recortado.
+fn safe_filename(raw: &str) -> String {
+    let base = std::path::Path::new(raw)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "archivo".into());
+    let clean: String = base
+        .chars()
+        .filter(|c| !matches!(c, '"' | '\r' | '\n' | '/' | '\\'))
+        .collect();
+    let clean = clean.trim();
+    if clean.is_empty() {
+        return "archivo".into();
+    }
+    clean.chars().take(128).collect()
+}
+
+fn content_disposition_value(filename: &str, inline: bool) -> String {
+    let safe = safe_filename(filename);
+    let kind = if inline { "inline" } else { "attachment" };
+    // `filename` ASCII-safe + `filename*` UTF-8 para tildes/espacios.
+    let encoded: String = urlencode(&safe);
+    format!("{kind}; filename=\"{safe}\"; filename*=UTF-8''{encoded}")
+}
+
+fn urlencode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+/// HEAD /download/<hash>: mismos headers que GET pero sin body.
+async fn download_head(
+    State(state): State<Arc<Gateway>>,
+    Path(hash_s): Path<String>,
+    Query(q): Query<DownloadQuery>,
+) -> impl IntoResponse {
+    let Some(hash) = parse_blob_hash(&hash_s) else {
+        return (StatusCode::BAD_REQUEST, "hash inválido").into_response();
+    };
+    if !state.store.blobs().has(hash).await.unwrap_or(false) {
+        return (StatusCode::NOT_FOUND, "blob no disponible en este nodo").into_response();
+    }
+    let total = match state.store.blobs().status(hash).await {
+        Ok(iroh_blobs::api::blobs::BlobStatus::Complete { size }) => size,
+        Ok(_) => {
+            return (StatusCode::NOT_FOUND, "blob parcial en este nodo").into_response();
+        }
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("status: {e}")).into_response();
+        }
+    };
+    let mime = mime_for(&state, &hash_s);
+    let row = state.db.get_by_hash(&hash_s).ok().flatten();
+    let filename = row.map(|r| r.path).unwrap_or_else(|| "archivo".into());
+    let want_inline = q.inline.as_deref() == Some("1") && is_previewable_mime(&mime);
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    resp_headers.insert(
+        header::CACHE_CONTROL,
+        "private, max-age=3600".parse().unwrap(),
+    );
+    resp_headers.insert(header::CONTENT_LENGTH, total.to_string().parse().unwrap());
+    if let Ok(v) = mime.parse() {
+        resp_headers.insert(header::CONTENT_TYPE, v);
+    }
+    if let Ok(v) = content_disposition_value(&filename, want_inline).parse() {
+        resp_headers.insert(header::CONTENT_DISPOSITION, v);
+    }
+    (StatusCode::OK, resp_headers).into_response()
+}
+
+/// GET /download/<hash> con soporte `Range` (reanudar) para el apartado
+/// Almacenamiento. Transmisión directa PC→dispositivo por la tailnet
+/// (HTTPS WireGuard, sin nube). `?inline=1` fuerza `inline` si el MIME es
+/// previsualizable (imagen/PDF/texto/audio); resto → `attachment`.
+async fn download(
+    State(state): State<Arc<Gateway>>,
+    Path(hash_s): Path<String>,
+    Query(q): Query<DownloadQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(hash) = parse_blob_hash(&hash_s) else {
+        return (StatusCode::BAD_REQUEST, "hash inválido").into_response();
+    };
+    if !state.store.blobs().has(hash).await.unwrap_or(false) {
+        return (StatusCode::NOT_FOUND, "blob no disponible en este nodo").into_response();
+    }
+    let total = match state.store.blobs().status(hash).await {
+        Ok(iroh_blobs::api::blobs::BlobStatus::Complete { size }) => size,
+        Ok(_) => {
+            return (StatusCode::NOT_FOUND, "blob parcial en este nodo").into_response();
+        }
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("status: {e}")).into_response();
+        }
+    };
+    let mut reader = state.store.blobs().reader(hash);
+    let (start, end) = match parse_range(headers.get(header::RANGE), total) {
+        Ok(r) => r,
+        Err(err) => return err.into_response(),
+    };
+    let len = end - start + 1;
+    if let Err(e) = reader.seek(std::io::SeekFrom::Start(start)).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("seek: {e}")).into_response();
+    }
+    let limited = reader.take(len);
+    let stream = ReaderStream::with_capacity(limited, 64 * 1024);
+    let body = Body::from_stream(stream);
+
+    let mime = mime_for(&state, &hash_s);
+    let row = state.db.get_by_hash(&hash_s).ok().flatten();
+    let filename = row.map(|r| r.path).unwrap_or_else(|| "archivo".into());
+    let want_inline = q.inline.as_deref() == Some("1") && is_previewable_mime(&mime);
+
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    resp_headers.insert(
+        header::CACHE_CONTROL,
+        "private, max-age=3600".parse().unwrap(),
+    );
+    resp_headers.insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
+    resp_headers.insert(
+        header::CONTENT_TYPE,
+        mime.parse()
+            .unwrap_or_else(|_| "application/octet-stream".parse().unwrap()),
+    );
+    resp_headers.insert(
+        header::CONTENT_DISPOSITION,
+        content_disposition_value(&filename, want_inline)
+            .parse()
+            .unwrap_or_else(|_| "attachment".parse().unwrap()),
     );
 
     if headers.contains_key(header::RANGE) {
@@ -1398,6 +1716,7 @@ mod tests {
             tag: String::new(),
             title: String::new(),
             watched: false,
+            kind: crate::db::FILE_KIND_MEDIA.into(),
         })?;
 
         let (base, _h) = Gateway::serve_loopback(store, db, "test-endpoint".into()).await?;
@@ -1443,6 +1762,7 @@ mod tests {
             tag: String::new(),
             title: String::new(),
             watched: false,
+            kind: crate::db::FILE_KIND_MEDIA.into(),
         })?;
 
         let (base, _h) = Gateway::serve_loopback(store, db, "test-endpoint".into()).await?;
@@ -1488,6 +1808,7 @@ mod tests {
             tag: String::new(),
             title: String::new(),
             watched: false,
+            kind: crate::db::FILE_KIND_MEDIA.into(),
         })?;
 
         let (base, _h) = Gateway::serve_loopback(store, db, "abc123".into()).await?;
@@ -1530,6 +1851,14 @@ mod tests {
         assert!(
             html.contains(r#"scan-exist-row').style.display=ex?'':'none'"#),
             "el conmutador debe mostrar la fila existente solo en modo existente"
+        );
+        assert!(
+            html.contains("Streaming") && html.contains("Almacenamiento"),
+            "la UI debe tener apartados Streaming y Almacenamiento"
+        );
+        assert!(
+            html.contains("/api/storage") && html.contains("/download/"),
+            "la UI debe enlazar almacenamiento y descarga"
         );
         // API lista
         let body = client
@@ -1867,6 +2196,7 @@ mod tests {
                 tag: format!("t{h}"),
                 title: String::new(),
                 watched: false,
+                kind: crate::db::FILE_KIND_MEDIA.into(),
             })?;
         }
         let (base, _h) = Gateway::serve_loopback(store, db, "reorder-test".into()).await?;
@@ -2228,6 +2558,175 @@ mod tests {
             .send()
             .await?;
         assert_eq!(r.status(), 400);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn storage_add_list_y_download() -> anyhow::Result<()> {
+        use iroh_blobs::store::mem::MemStore;
+        let mem = MemStore::new();
+        let store: BlobsStore = mem.into();
+        let db = Db::open_in_memory()?;
+        let (base, _h) = Gateway::serve_loopback(store, db, "storage-test".into()).await?;
+        let client = reqwest::Client::new();
+
+        // Archivo genérico fuera de vídeos.
+        let dir = tempfile::tempdir()?;
+        let pdf = dir.path().join("manual.pdf");
+        std::fs::write(&pdf, b"%PDF-contenido-de-prueba-12345")?;
+        let body = client
+            .post(format!("{base}/api/storage/add-file"))
+            .body(serde_json::json!({"path": pdf.to_string_lossy()}).to_string())
+            .header("Content-Type", "application/json")
+            .send()
+            .await?
+            .text()
+            .await?;
+        let v: serde_json::Value = serde_json::from_str(&body)?;
+        assert_eq!(v["path"], "manual.pdf");
+        assert_eq!(v["mime"], "application/pdf");
+        let hash = v["hash"].as_str().unwrap().to_string();
+
+        // Aparece en /api/storage pero NO en /api/files (streaming).
+        let storage: serde_json::Value = serde_json::from_str(
+            &client
+                .get(format!("{base}/api/storage"))
+                .send()
+                .await?
+                .text()
+                .await?,
+        )?;
+        assert!(storage
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["path"] == "manual.pdf"));
+        let media: serde_json::Value = serde_json::from_str(
+            &client
+                .get(format!("{base}/api/files"))
+                .send()
+                .await?
+                .text()
+                .await?,
+        )?;
+        assert!(!media
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["path"] == "manual.pdf"));
+
+        // Descarga completa: attachment + bytes exactos.
+        let r = client.get(format!("{base}/download/{hash}")).send().await?;
+        assert_eq!(r.status(), 200);
+        let disp = r.headers()["content-disposition"].to_str()?.to_string();
+        assert!(
+            disp.starts_with("attachment"),
+            "descarga debe ser attachment: {disp}"
+        );
+        assert!(
+            disp.contains("manual.pdf"),
+            "disposition debe llevar filename: {disp}"
+        );
+        assert_eq!(r.headers()["accept-ranges"], "bytes");
+        let body = r.bytes().await?;
+        assert_eq!(&body[..], b"%PDF-contenido-de-prueba-12345");
+
+        // Rango parcial reanudable.
+        let r = client
+            .get(format!("{base}/download/{hash}"))
+            .header("Range", "bytes=0-4")
+            .send()
+            .await?;
+        assert_eq!(r.status(), 206);
+        assert_eq!(&r.bytes().await?[..], b"%PDF-");
+
+        // HEAD: tamaño + disposition sin body.
+        let r = client
+            .head(format!("{base}/download/{hash}"))
+            .send()
+            .await?;
+        assert_eq!(r.status(), 200);
+        assert!(r.headers()["content-disposition"]
+            .to_str()?
+            .starts_with("attachment"));
+        assert_eq!(r.bytes().await?.len(), 0);
+
+        // ?inline=1 en PDF previsualizable → inline.
+        let r = client
+            .get(format!("{base}/download/{hash}?inline=1"))
+            .send()
+            .await?;
+        assert_eq!(r.status(), 200);
+        assert!(
+            r.headers()["content-disposition"]
+                .to_str()?
+                .starts_with("inline"),
+            "pdf con inline=1 debe previsualizar"
+        );
+
+        // Hash inexistente → 404, hash inválido → 400.
+        let r = client
+            .get(format!("{base}/download/{}", "00".repeat(32)))
+            .send()
+            .await?;
+        assert_eq!(r.status(), 404);
+        let r = client
+            .get(format!("{base}/download/no-es-hash"))
+            .send()
+            .await?;
+        assert_eq!(r.status(), 400);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn storage_upload_y_inline_zip() -> anyhow::Result<()> {
+        use iroh_blobs::store::mem::MemStore;
+        let mem = MemStore::new();
+        let store: BlobsStore = mem.into();
+        let db = Db::open_in_memory()?;
+        let (base, _h) = Gateway::serve_loopback(store, db, "storage-up".into()).await?;
+        let client = reqwest::Client::new();
+        let b = "storage-bound-1";
+        let body = format!(
+            "--{b}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"paquete.zip\"\r\n\
+             Content-Type: application/zip\r\n\r\nPK-falso-123\r\n--{b}--\r\n"
+        );
+        let r = client
+            .post(format!("{base}/api/storage/upload"))
+            .header("Content-Type", format!("multipart/form-data; boundary={b}"))
+            .body(body)
+            .send()
+            .await?;
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&r.text().await?)?;
+        assert_eq!(v["path"], "paquete.zip");
+        let hash = v["hash"].as_str().unwrap().to_string();
+        // En storage sí, en streaming no.
+        let storage: serde_json::Value = serde_json::from_str(
+            &client
+                .get(format!("{base}/api/storage"))
+                .send()
+                .await?
+                .text()
+                .await?,
+        )?;
+        assert!(storage
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["path"] == "paquete.zip"));
+        // ZIP no previsualizable: inline=1 sigue siendo attachment.
+        let r = client
+            .get(format!("{base}/download/{hash}?inline=1"))
+            .send()
+            .await?;
+        assert_eq!(r.status(), 200);
+        assert!(
+            r.headers()["content-disposition"]
+                .to_str()?
+                .starts_with("attachment"),
+            "zip nunca va inline"
+        );
         Ok(())
     }
 

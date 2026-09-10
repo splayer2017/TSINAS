@@ -199,6 +199,7 @@ async fn main() -> anyhow::Result<()> {
                 tag: tag_s,
                 title: String::new(),
                 watched: false,
+                kind: p2p_nube_core::FILE_KIND_MEDIA.into(),
             })?;
         }
         println!(

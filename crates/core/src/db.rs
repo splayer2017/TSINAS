@@ -5,12 +5,29 @@ use std::sync::{Arc, Mutex};
 
 use crate::policy::Policy;
 
+/// Kind de fila: `media` (streaming, vídeos) o `file` (almacenamiento genérico).
+pub const FILE_KIND_MEDIA: &str = "media";
+pub const FILE_KIND_FILE: &str = "file";
+
+fn default_file_kind() -> String {
+    FILE_KIND_MEDIA.to_string()
+}
+
+/// Normaliza kind de archivo: `file` para almacenamiento, resto → `media`.
+pub fn normalize_file_kind(raw: &str) -> String {
+    match raw.trim().to_lowercase().as_str() {
+        "file" | "storage" | "almacenamiento" | "archivo" => FILE_KIND_FILE.to_string(),
+        _ => FILE_KIND_MEDIA.to_string(),
+    }
+}
+
 /// Fila de la proyección local (derivada de iroh-docs, no es fuente de verdad).
 /// `tag` es el nombre del tag persistente en el blob store que protege el
 /// contenido del GC; se borra al quitar el archivo (des-pinear).
 /// `title` es el título visible editable desde la web (sin tocar disco);
 /// vacío = mostrar el nombre base del `path`.
 /// `watched` marca el episodio como visto (switch en la UI, compartido).
+/// `kind` separa `media` (streaming) de `file` (almacenamiento genérico).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileRow {
     pub path: String,
@@ -24,6 +41,8 @@ pub struct FileRow {
     pub title: String,
     #[serde(default)]
     pub watched: bool,
+    #[serde(default = "default_file_kind")]
+    pub kind: String,
 }
 
 impl FileRow {
@@ -141,7 +160,8 @@ fn ensure_schema(conn: &Connection) -> anyhow::Result<()> {
             host_id TEXT NOT NULL DEFAULT '',
             tag TEXT NOT NULL DEFAULT '',
             title TEXT NOT NULL DEFAULT '',
-            watched INTEGER NOT NULL DEFAULT 0
+            watched INTEGER NOT NULL DEFAULT 0,
+            kind TEXT NOT NULL DEFAULT 'media'
         );
         CREATE TABLE IF NOT EXISTS settings(
             key TEXT PRIMARY KEY,
@@ -184,6 +204,10 @@ fn ensure_schema(conn: &Connection) -> anyhow::Result<()> {
         [],
     );
     let _ = conn.execute(
+        "ALTER TABLE files ADD COLUMN kind TEXT NOT NULL DEFAULT 'media'",
+        [],
+    );
+    let _ = conn.execute(
         "ALTER TABLE collections ADD COLUMN poster_url TEXT NOT NULL DEFAULT ''",
         [],
     );
@@ -216,6 +240,10 @@ fn row_from(r: &rusqlite::Row) -> rusqlite::Result<FileRow> {
         tag: r.get(6)?,
         title: r.get(7).unwrap_or_default(),
         watched: r.get::<_, Option<i64>>(8)?.unwrap_or(0) != 0,
+        kind: r
+            .get::<_, Option<String>>(9)
+            .unwrap_or(None)
+            .unwrap_or_else(|| FILE_KIND_MEDIA.to_string()),
     })
 }
 
@@ -253,13 +281,14 @@ impl Db {
     }
 
     pub fn upsert_file(&self, row: &FileRow) -> anyhow::Result<()> {
+        let kind = normalize_file_kind(&row.kind);
         let conn = self.inner.lock().unwrap();
         conn.execute(
-            "INSERT INTO files(path,hash,size,mime,policy,host_id,tag,title,watched)
-             VALUES(?,?,?,?,?,?,?,?,?)
+            "INSERT INTO files(path,hash,size,mime,policy,host_id,tag,title,watched,kind)
+             VALUES(?,?,?,?,?,?,?,?,?,?)
              ON CONFLICT(path) DO UPDATE SET hash=excluded.hash,size=excluded.size,
                mime=excluded.mime,policy=excluded.policy,host_id=excluded.host_id,
-               tag=excluded.tag",
+               tag=excluded.tag,kind=excluded.kind",
             params![
                 row.path,
                 row.hash,
@@ -270,6 +299,7 @@ impl Db {
                 row.tag,
                 row.title,
                 i64::from(row.watched),
+                kind,
             ],
         )?;
         Ok(())
@@ -297,7 +327,7 @@ impl Db {
     pub fn list_files(&self) -> anyhow::Result<Vec<FileRow>> {
         let conn = self.inner.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT path,hash,size,mime,policy,host_id,tag,title,watched FROM files ORDER BY path",
+            "SELECT path,hash,size,mime,policy,host_id,tag,title,watched,kind FROM files ORDER BY path",
         )?;
         let rows = stmt
             .query_map([], row_from)?
@@ -305,10 +335,23 @@ impl Db {
         Ok(rows)
     }
 
+    /// Lista solo un kind (`media` = streaming, `file` = almacenamiento).
+    pub fn list_files_by_kind(&self, kind: &str) -> anyhow::Result<Vec<FileRow>> {
+        let kind = normalize_file_kind(kind);
+        let conn = self.inner.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT path,hash,size,mime,policy,host_id,tag,title,watched,kind FROM files WHERE kind=? ORDER BY path",
+        )?;
+        let rows = stmt
+            .query_map([kind], row_from)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub fn get_by_hash(&self, hash: &str) -> anyhow::Result<Option<FileRow>> {
         let conn = self.inner.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT path,hash,size,mime,policy,host_id,tag,title,watched FROM files WHERE hash=?",
+            "SELECT path,hash,size,mime,policy,host_id,tag,title,watched,kind FROM files WHERE hash=?",
         )?;
         let mut rows = stmt.query_map([hash], row_from)?;
         Ok(rows.next().transpose()?)
@@ -317,7 +360,7 @@ impl Db {
     pub fn get_by_path(&self, path: &str) -> anyhow::Result<Option<FileRow>> {
         let conn = self.inner.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT path,hash,size,mime,policy,host_id,tag,title,watched FROM files WHERE path=?",
+            "SELECT path,hash,size,mime,policy,host_id,tag,title,watched,kind FROM files WHERE path=?",
         )?;
         let mut rows = stmt.query_map([path], row_from)?;
         Ok(rows.next().transpose()?)
@@ -326,7 +369,7 @@ impl Db {
     pub fn get_rows_by_hash(&self, hash: &str) -> anyhow::Result<Vec<FileRow>> {
         let conn = self.inner.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT path,hash,size,mime,policy,host_id,tag,title,watched FROM files WHERE hash=?",
+            "SELECT path,hash,size,mime,policy,host_id,tag,title,watched,kind FROM files WHERE hash=?",
         )?;
         let rows = stmt
             .query_map([hash], row_from)?
@@ -838,12 +881,16 @@ mod tests {
             tag: "t1".into(),
             title: String::new(),
             watched: false,
+            kind: FILE_KIND_MEDIA.into(),
         })?;
         let all = db.list_files()?;
         assert_eq!(all.len(), 1);
         assert!(!all[0].policy.allows_download());
         assert!(all[0].policy.allows_stream());
         assert_eq!(all[0].display_title(), "cap01.mkv");
+        assert_eq!(all[0].kind, FILE_KIND_MEDIA);
+        assert_eq!(db.list_files_by_kind(FILE_KIND_MEDIA)?.len(), 1);
+        assert!(db.list_files_by_kind(FILE_KIND_FILE)?.is_empty());
         assert!(db.set_title("anime/cap01.mkv", "Capítulo 1")?);
         assert_eq!(
             db.get_by_path("anime/cap01.mkv")?.unwrap().display_title(),
@@ -863,6 +910,7 @@ mod tests {
             tag: "t2".into(),
             title: String::new(),
             watched: false,
+            kind: FILE_KIND_MEDIA.into(),
         })?;
         assert!(db.get_by_path("anime/cap01.mkv")?.unwrap().watched);
         assert!(db.set_watched("anime/cap01.mkv", false)?);
@@ -917,6 +965,7 @@ mod tests {
                 tag: format!("t{h}"),
                 title: String::new(),
                 watched: false,
+                kind: FILE_KIND_MEDIA.into(),
             })?;
         }
         let serie = db.create_collection("series", "Re:Zero", "")?;
@@ -946,6 +995,44 @@ mod tests {
         db.add_item(&suelta.id, "s/film.mkv", "", "", 0)?;
         assert!(db.collection_detail(&peli.id)?.unwrap().items.is_empty());
         assert!(db.add_item(&suelta.id, "s/e02.mkv", "", "", 0).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn separa_media_y_storage_por_kind() -> anyhow::Result<()> {
+        let db = Db::open_in_memory()?;
+        db.upsert_file(&FileRow {
+            path: "cap01.mkv".into(),
+            hash: "h-media".into(),
+            size: 10,
+            mime: "video/x-matroska".into(),
+            policy: Policy::StreamOnly,
+            host_id: "h".into(),
+            tag: "t1".into(),
+            title: String::new(),
+            watched: false,
+            kind: FILE_KIND_MEDIA.into(),
+        })?;
+        db.upsert_file(&FileRow {
+            path: "manual.pdf".into(),
+            hash: "h-file".into(),
+            size: 20,
+            mime: "application/pdf".into(),
+            policy: Policy::Mirror,
+            host_id: "h".into(),
+            tag: "t2".into(),
+            title: String::new(),
+            watched: false,
+            kind: FILE_KIND_FILE.into(),
+        })?;
+        assert_eq!(db.list_files()?.len(), 2);
+        let media = db.list_files_by_kind(FILE_KIND_MEDIA)?;
+        assert_eq!(media.len(), 1);
+        assert_eq!(media[0].path, "cap01.mkv");
+        let files = db.list_files_by_kind(FILE_KIND_FILE)?;
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "manual.pdf");
+        assert!(files[0].policy.allows_download());
         Ok(())
     }
 
