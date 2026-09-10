@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use p2p_nube_core::{db::FileRow, gateway::Gateway, tailnet, Library, Node, Policy};
+use p2p_nube_core::{gateway::Gateway, tailnet, Library, Node, Policy};
 
 fn usage() -> ! {
     eprintln!(
@@ -179,29 +179,12 @@ async fn main() -> anyhow::Result<()> {
     // Hash del archivo inicial, si lo hubo (para las URLs de ejemplo).
     let mut hash_s = String::new();
     if let Some(f) = file.as_ref() {
-        let added = library.add_file(&f.to_string_lossy(), None).await?;
+        // MIN-03: política directa en la importación (un solo upsert).
+        let added = library
+            .add_file_with_policy(&f.to_string_lossy(), None, policy)
+            .await?;
         println!("blob hash   : {}", added.hash);
         println!("tamaño      : {} bytes", added.size);
-
-        if policy != Policy::StreamOnly {
-            let tag_s = node
-                .db
-                .get_by_hash(&added.hash)?
-                .map(|r| r.tag)
-                .unwrap_or_default();
-            node.db.upsert_file(&FileRow {
-                path: added.path.clone(),
-                hash: added.hash.clone(),
-                size: added.size,
-                mime: added.mime.clone(),
-                policy,
-                host_id: node.endpoint_id(),
-                tag: tag_s,
-                title: String::new(),
-                watched: false,
-                kind: p2p_nube_core::FILE_KIND_MEDIA.into(),
-            })?;
-        }
         println!(
             "política    : {} (allows_download={})",
             policy.as_str(),
@@ -226,13 +209,16 @@ async fn main() -> anyhow::Result<()> {
         }
     } else {
         // Modo Dev: HTTPS fijo en https://<domain>:<port> bindeado a la IP tailnet.
-        let domain = domain
-            .or_else(tailnet::magic_dns)
-            .unwrap_or_else(|| DEV_DOMAIN_DEFAULT.into());
+        // MIN-04: versión async (sin bloquear el runtime en arranque).
+        let domain = match domain {
+            Some(d) => d,
+            None => tailnet::magic_dns_async()
+                .await
+                .unwrap_or_else(|| DEV_DOMAIN_DEFAULT.into()),
+        };
         let bind_ip: std::net::IpAddr = match bind {
             Some(b) => b.parse().unwrap_or_else(|_| usage()),
-            None => tailnet::tailnet_ipv4()
-                .unwrap_or_else(|e| {
+            None => tailnet::tailnet_ipv4_async().await.unwrap_or_else(|e| {
                     eprintln!("sin IP tailnet ({e}); usa --bind 127.0.0.1 --http-local o revisa tailscaled");
                     std::process::exit(1);
                 })

@@ -76,6 +76,17 @@ impl Drop for TempStagedFile {
     }
 }
 
+/// HIGH-01/MED-01: corre un cierre síncrono de filesystem en el pool
+/// bloqueante en vez de estacionar un worker Tokio.
+async fn blocking_io<T>(f: impl FnOnce() -> anyhow::Result<T> + Send + 'static) -> anyhow::Result<T>
+where
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| anyhow::anyhow!("tarea bloqueante cancelada: {e}"))?
+}
+
 impl Library {
     pub fn new(store: BlobsStore, db: Db, endpoint_id: String) -> Self {
         let staging_dir =
@@ -141,6 +152,101 @@ impl Library {
         Ok(abs)
     }
 
+    /// MED-01: `resolve + is_file + metadata` fuera de workers Tokio.
+    /// `reject_empty` preserva la semántica histórica por rama (`add_file`
+    /// admite vacíos, el resto no).
+    async fn fs_meta(&self, raw: &str, reject_empty: bool) -> anyhow::Result<(PathBuf, u64)> {
+        let roots = self.media_roots.clone();
+        let raw = raw.trim().to_string();
+        blocking_io(move || {
+            if raw.is_empty() {
+                anyhow::bail!("path vacío");
+            }
+            let abs = std::fs::canonicalize(&raw)
+                .map_err(|_| anyhow::anyhow!("no existe la ruta: {raw}"))?;
+            if !roots.is_empty() && !roots.iter().any(|r| abs.starts_with(r)) {
+                anyhow::bail!("ruta fuera de las carpetas permitidas: {}", abs.display());
+            }
+            if !abs.is_file() {
+                anyhow::bail!("no es un archivo: {}", abs.display());
+            }
+            let size = std::fs::metadata(&abs)?.len();
+            if reject_empty && size == 0 {
+                anyhow::bail!("el archivo está vacío: {}", abs.display());
+            }
+            Ok((abs, size))
+        })
+        .await
+    }
+
+    /// MED-01: validación del temporal de subida en pool bloqueante.
+    async fn staged_meta(staged: &Path) -> anyhow::Result<u64> {
+        let staged = staged.to_path_buf();
+        blocking_io(move || {
+            if !staged.is_file() {
+                anyhow::bail!("subida incompleta: temporal no encontrado");
+            }
+            let size = std::fs::metadata(&staged)?.len();
+            if size == 0 {
+                anyhow::bail!("el archivo subido está vacío");
+            }
+            Ok(size)
+        })
+        .await
+    }
+
+    /// HIGH-02: núcleo común de importación (tag/hash/mime + des-pineo
+    /// MED-01 + `upsert` + `set_hash` en docs). `display` ya viene resuelto
+    /// por el llamante; solo `policy`/`kind` varían entre ramas.
+    async fn import_tagged(
+        &self,
+        display: String,
+        size: u64,
+        hash: iroh_blobs::Hash,
+        tag_s: String,
+        policy: Policy,
+        kind: &str,
+    ) -> anyhow::Result<AddedFile> {
+        let mime = guess_mime(&display);
+        let hash_s = hash.to_string();
+        // Des-pineo del tag previo si cambió (HIGH-01: DB en bloqueante).
+        let dp = display.clone();
+        let prev: Option<String> = crate::gateway::db_blocking(&self.db, move |db| {
+            Ok(db.get_by_path(&dp)?.map(|r| r.tag))
+        })
+        .await?;
+        if let Some(pt) = prev {
+            if !pt.is_empty() && pt != tag_s {
+                let _ = self.store.tags().delete(pt.as_bytes()).await;
+            }
+        }
+        let row = FileRow {
+            path: display.clone(),
+            hash: hash_s.clone(),
+            size,
+            mime: mime.clone(),
+            policy,
+            host_id: self.endpoint_id.clone(),
+            tag: tag_s,
+            title: String::new(),
+            watched: false,
+            kind: kind.to_string(),
+        };
+        crate::gateway::db_blocking(&self.db, move |db| db.upsert_file(&row)).await?;
+        // BLOCK-01: Publicar entrada en iroh-docs si hay un doc activo
+        if let (Some(doc), Some(author)) = (&self.doc, &self.author) {
+            let _ = doc
+                .set_hash(*author, display.as_bytes().to_vec(), hash, size)
+                .await;
+        }
+        Ok(AddedFile {
+            path: display,
+            hash: hash_s,
+            size,
+            mime,
+        })
+    }
+
     /// Añade un archivo al store y a la lista. `display_base` es el prefijo
     /// de presentación (p.ej. nombre de la carpeta escaneada); `None` usa
     /// solo el nombre del archivo.
@@ -149,11 +255,19 @@ impl Library {
         raw_path: &str,
         display_base: Option<&str>,
     ) -> anyhow::Result<AddedFile> {
-        let abs = self.resolve(raw_path)?;
-        if !abs.is_file() {
-            anyhow::bail!("no es un archivo: {}", abs.display());
-        }
-        let size = std::fs::metadata(&abs)?.len();
+        self.add_file_with_policy(raw_path, display_base, Policy::StreamOnly)
+            .await
+    }
+
+    /// MIN-03: variante con política explícita (el CLI la usa directo y
+    /// evita el doble `upsert` + lectura intermedia).
+    pub async fn add_file_with_policy(
+        &self,
+        raw_path: &str,
+        display_base: Option<&str>,
+        policy: Policy,
+    ) -> anyhow::Result<AddedFile> {
+        let (abs, size) = self.fs_meta(raw_path, false).await?;
         let name = abs
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
@@ -174,44 +288,9 @@ impl Library {
                 format: BlobFormat::Raw,
             })
             .await?;
-        let hash_s = tag.hash.to_string();
         let tag_s = String::from_utf8_lossy(tag.name.as_ref()).to_string();
-        let mime = guess_mime(&name);
-
-        // MED-01: Si ya existía un tag previo para esta ruta, y cambió,
-        // des-pinearlo de store.tags() para evitar fugas de disco.
-        if let Ok(Some(prev)) = self.db.get_by_path(&path) {
-            if !prev.tag.is_empty() && prev.tag != tag_s {
-                let _ = self.store.tags().delete(prev.tag.as_bytes()).await;
-            }
-        }
-
-        self.db.upsert_file(&FileRow {
-            path: path.clone(),
-            hash: hash_s.clone(),
-            size,
-            mime: mime.clone(),
-            policy: Policy::StreamOnly,
-            host_id: self.endpoint_id.clone(),
-            tag: tag_s,
-            title: String::new(),
-            watched: false,
-            kind: FILE_KIND_MEDIA.to_string(),
-        })?;
-
-        // BLOCK-01: Publicar entrada en iroh-docs si hay un doc activo
-        if let (Some(doc), Some(author)) = (&self.doc, &self.author) {
-            let _ = doc
-                .set_hash(*author, path.as_bytes().to_vec(), tag.hash, size)
-                .await;
-        }
-
-        Ok(AddedFile {
-            path,
-            hash: hash_s,
-            size,
-            mime,
-        })
+        self.import_tagged(path, size, tag.hash, tag_s, policy, FILE_KIND_MEDIA)
+            .await
     }
 
     /// Añade un archivo genérico al apartado Almacenamiento (cualquier
@@ -219,14 +298,7 @@ impl Library {
     /// `add_file`, pero con `policy=Mirror` (descarga permitida) y
     /// `kind=file` para que no aparezca en Biblioteca/Streaming.
     pub async fn add_storage_file(&self, raw_path: &str) -> anyhow::Result<AddedFile> {
-        let abs = self.resolve(raw_path)?;
-        if !abs.is_file() {
-            anyhow::bail!("no es un archivo: {}", abs.display());
-        }
-        let size = std::fs::metadata(&abs)?.len();
-        if size == 0 {
-            anyhow::bail!("el archivo está vacío: {}", abs.display());
-        }
+        let (abs, size) = self.fs_meta(raw_path, true).await?;
         let name = abs
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
@@ -242,41 +314,9 @@ impl Library {
                 format: BlobFormat::Raw,
             })
             .await?;
-        let hash_s = tag.hash.to_string();
         let tag_s = String::from_utf8_lossy(tag.name.as_ref()).to_string();
-        let mime = guess_mime(&path);
-
-        if let Ok(Some(prev)) = self.db.get_by_path(&path) {
-            if !prev.tag.is_empty() && prev.tag != tag_s {
-                let _ = self.store.tags().delete(prev.tag.as_bytes()).await;
-            }
-        }
-
-        self.db.upsert_file(&FileRow {
-            path: path.clone(),
-            hash: hash_s.clone(),
-            size,
-            mime: mime.clone(),
-            policy: Policy::Mirror,
-            host_id: self.endpoint_id.clone(),
-            tag: tag_s,
-            title: String::new(),
-            watched: false,
-            kind: FILE_KIND_FILE.to_string(),
-        })?;
-
-        if let (Some(doc), Some(author)) = (&self.doc, &self.author) {
-            let _ = doc
-                .set_hash(*author, path.as_bytes().to_vec(), tag.hash, size)
-                .await;
-        }
-
-        Ok(AddedFile {
-            path,
-            hash: hash_s,
-            size,
-            mime,
-        })
+        self.import_tagged(path, size, tag.hash, tag_s, Policy::Mirror, FILE_KIND_FILE)
+            .await
     }
 
     /// Lista candidatos de vídeo en una carpeta (no lee contenido).
@@ -324,53 +364,24 @@ impl Library {
     /// borrar el temporal (best-effort).
     pub async fn add_upload(&self, display_name: &str, staged: &Path) -> anyhow::Result<AddedFile> {
         let name = sanitize_filename(display_name);
-        if !staged.is_file() {
-            anyhow::bail!("subida incompleta: temporal no encontrado");
-        }
-        let size = std::fs::metadata(staged)?.len();
-        if size == 0 {
-            anyhow::bail!("el archivo subido está vacío");
-        }
-        let tag = self.store.blobs().add_path(staged).await?;
-        let hash_s = tag.hash.to_string();
+        let size = Self::staged_meta(staged).await?;
+        let staged_owned = staged.to_path_buf();
+        let tag = self.store.blobs().add_path(&staged_owned).await?;
         let tag_s = String::from_utf8_lossy(tag.name.as_ref()).to_string();
-        let mime = guess_mime(&name);
-
-        // MED-01: Des-pinear tag anterior si existía para este archivo y cambió
-        if let Ok(Some(prev)) = self.db.get_by_path(&name) {
-            if !prev.tag.is_empty() && prev.tag != tag_s {
-                let _ = self.store.tags().delete(prev.tag.as_bytes()).await;
-            }
-        }
-
-        self.db.upsert_file(&FileRow {
-            path: name.clone(),
-            hash: hash_s.clone(),
-            size,
-            mime: mime.clone(),
-            policy: Policy::StreamOnly,
-            host_id: self.endpoint_id.clone(),
-            tag: tag_s,
-            title: String::new(),
-            watched: false,
-            kind: FILE_KIND_MEDIA.to_string(),
-        })?;
-
-        // BLOCK-01: Publicar entrada en iroh-docs si hay un doc activo
-        if let (Some(doc), Some(author)) = (&self.doc, &self.author) {
-            let _ = doc
-                .set_hash(*author, name.as_bytes().to_vec(), tag.hash, size)
-                .await;
-        }
+        let added = self
+            .import_tagged(
+                name,
+                size,
+                tag.hash,
+                tag_s,
+                Policy::StreamOnly,
+                FILE_KIND_MEDIA,
+            )
+            .await?;
 
         // El contenido ya quedó en el blob store; liberar el temporal.
-        let _ = std::fs::remove_file(staged);
-        Ok(AddedFile {
-            path: name,
-            hash: hash_s,
-            size,
-            mime,
-        })
+        let _ = tokio::fs::remove_file(&staged_owned).await;
+        Ok(added)
     }
 
     /// Importa una subida del navegador/móvil al apartado Almacenamiento
@@ -382,57 +393,24 @@ impl Library {
         staged: &Path,
     ) -> anyhow::Result<AddedFile> {
         let name = sanitize_filename(display_name);
-        if !staged.is_file() {
-            anyhow::bail!("subida incompleta: temporal no encontrado");
-        }
-        let size = std::fs::metadata(staged)?.len();
-        if size == 0 {
-            anyhow::bail!("el archivo subido está vacío");
-        }
-        let tag = self.store.blobs().add_path(staged).await?;
-        let hash_s = tag.hash.to_string();
+        let size = Self::staged_meta(staged).await?;
+        let staged_owned = staged.to_path_buf();
+        let tag = self.store.blobs().add_path(&staged_owned).await?;
         let tag_s = String::from_utf8_lossy(tag.name.as_ref()).to_string();
-        let mime = guess_mime(&name);
+        let added = self
+            .import_tagged(name, size, tag.hash, tag_s, Policy::Mirror, FILE_KIND_FILE)
+            .await?;
 
-        if let Ok(Some(prev)) = self.db.get_by_path(&name) {
-            if !prev.tag.is_empty() && prev.tag != tag_s {
-                let _ = self.store.tags().delete(prev.tag.as_bytes()).await;
-            }
-        }
-
-        self.db.upsert_file(&FileRow {
-            path: name.clone(),
-            hash: hash_s.clone(),
-            size,
-            mime: mime.clone(),
-            policy: Policy::Mirror,
-            host_id: self.endpoint_id.clone(),
-            tag: tag_s,
-            title: String::new(),
-            watched: false,
-            kind: FILE_KIND_FILE.to_string(),
-        })?;
-
-        if let (Some(doc), Some(author)) = (&self.doc, &self.author) {
-            let _ = doc
-                .set_hash(*author, name.as_bytes().to_vec(), tag.hash, size)
-                .await;
-        }
-
-        let _ = std::fs::remove_file(staged);
-        Ok(AddedFile {
-            path: name,
-            hash: hash_s,
-            size,
-            mime,
-        })
+        let _ = tokio::fs::remove_file(&staged_owned).await;
+        Ok(added)
     }
 
     /// Quita un archivo de la lista y des-pinea su tag para que el GC del
     /// store libere el espacio. Nunca borra el archivo original del usuario.
     /// Devuelve `true` si existía.
     pub async fn remove_by_hash(&self, hash: &str) -> anyhow::Result<bool> {
-        let rows = self.db.get_rows_by_hash(hash)?;
+        let h = hash.to_string();
+        let rows = crate::gateway::db_blocking(&self.db, move |db| db.get_rows_by_hash(&h)).await?;
         if rows.is_empty() {
             return Ok(false);
         }
@@ -446,25 +424,30 @@ impl Library {
                 let _ = doc.del(*author, row.path.as_bytes().to_vec()).await;
             }
         }
-        self.db.delete_by_hash(hash)
+        let h = hash.to_string();
+        crate::gateway::db_blocking(&self.db, move |db| db.delete_by_hash(&h)).await
     }
 
     /// Quita un archivo de la lista por path específico. Si otros archivos
     /// comparten el mismo hash/tag, preserva el tag en el blob store.
     pub async fn remove_by_path(&self, path: &str) -> anyhow::Result<bool> {
-        let row = match self.db.get_by_path(path)? {
+        let p = path.to_string();
+        let row = match crate::gateway::db_blocking(&self.db, move |db| db.get_by_path(&p)).await? {
             Some(r) => r,
             None => return Ok(false),
         };
         // Verificar si algún otro archivo comparte el mismo tag antes de des-pinear
-        let all_rows = self.db.get_rows_by_hash(&row.hash)?;
+        let h = row.hash.clone();
+        let all_rows =
+            crate::gateway::db_blocking(&self.db, move |db| db.get_rows_by_hash(&h)).await?;
         if all_rows.len() <= 1 && !row.tag.is_empty() {
             let _ = self.store.tags().delete(row.tag.as_bytes()).await;
         }
         if let (Some(doc), Some(author)) = (&self.doc, &self.author) {
             let _ = doc.del(*author, row.path.as_bytes().to_vec()).await;
         }
-        self.db.delete_by_path(path)
+        let p = path.to_string();
+        crate::gateway::db_blocking(&self.db, move |db| db.delete_by_path(&p)).await
     }
 }
 
@@ -642,6 +625,18 @@ pub struct JobState {
     pub errors: Vec<String>,
 }
 
+/// MED-03: vista resumida sin clonar `added/errors` (el poll solo necesita
+/// conteos; el detalle completo va con `?full=1`).
+#[derive(Debug, Clone)]
+pub struct JobSummary {
+    pub id: String,
+    pub status: String,
+    pub total: usize,
+    pub done: usize,
+    pub added_count: usize,
+    pub errors_count: usize,
+}
+
 /// Registro de jobs en memoria con límite acotado (FIFO).
 #[derive(Debug, Clone, Default)]
 pub struct Jobs {
@@ -654,12 +649,23 @@ impl Jobs {
         let id = self.next.fetch_add(1, Ordering::SeqCst).to_string();
         let mut m = self.inner.lock().unwrap();
 
-        // Si superamos la capacidad máxima, purgamos las tareas más antiguas
+        // Si superamos la capacidad máxima, purgamos las tareas más antiguas.
+        // MED-03: nunca evictar trabajos `running` (su `progress()` posterior
+        // sería no-op y el cliente vería 404); si todo está en curso, se
+        // acepta un leve desborde acotado por el semáforo de escaneos.
         if m.len() >= MAX_JOBS {
             let mut keys: Vec<u64> = m.keys().filter_map(|k| k.parse().ok()).collect();
             keys.sort_unstable();
-            let to_remove = m.len() - MAX_JOBS + 1;
-            for k in keys.into_iter().take(to_remove) {
+            let evictable: Vec<u64> = keys
+                .into_iter()
+                .filter(|k| {
+                    m.get(&k.to_string())
+                        .map(|j| j.status != "running")
+                        .unwrap_or(true)
+                })
+                .collect();
+            let to_remove = (m.len() - MAX_JOBS + 1).min(evictable.len());
+            for k in evictable.into_iter().take(to_remove) {
                 m.remove(&k.to_string());
             }
         }
@@ -684,6 +690,18 @@ impl Jobs {
 
     pub fn get(&self, id: &str) -> Option<JobState> {
         self.inner.lock().unwrap().get(id).cloned()
+    }
+
+    /// Resumen barato para el poll (sin clonar vectores).
+    pub fn summary(&self, id: &str) -> Option<JobSummary> {
+        self.inner.lock().unwrap().get(id).map(|j| JobSummary {
+            id: j.id.clone(),
+            status: j.status.clone(),
+            total: j.total,
+            done: j.done,
+            added_count: j.added.len(),
+            errors_count: j.errors.len(),
+        })
     }
 
     pub fn progress(&self, id: &str, added: Option<String>, error: Option<String>) {
@@ -745,6 +763,26 @@ mod tests {
         assert!(lib.db.list_files()?.is_empty());
         assert!(!lib.remove_by_hash(&added.hash).await?);
         Ok(())
+    }
+
+    #[test]
+    fn jobs_resumen_y_no_evicta_running() {
+        // MED-03: resumen barato + la purga FIFO respeta trabajos en curso.
+        let jobs = Jobs::default();
+        let id = jobs.create(2);
+        let s = jobs.summary(&id).expect("debe existir");
+        assert_eq!(
+            (s.done, s.total, s.added_count, s.errors_count),
+            (0, 2, 0, 0)
+        );
+        jobs.progress(&id, Some("a.mkv".into()), None);
+        let s = jobs.summary(&id).expect("debe existir");
+        assert_eq!((s.done, s.added_count), (1, 1));
+        // Llenar por encima de MAX_JOBS con terminados: el running sobrevive.
+        for _ in 0..MAX_JOBS {
+            jobs.create(0);
+        }
+        assert_eq!(jobs.summary(&id).expect("running no evictado").done, 1);
     }
 
     #[tokio::test]

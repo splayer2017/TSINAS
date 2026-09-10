@@ -30,7 +30,13 @@ pub struct Gateway {
     pub jobs: Jobs,
     pub mime_cache: Arc<std::sync::RwLock<std::collections::HashMap<String, String>>>,
     pub poster_dir: PathBuf,
+    /// Handles de workers de escaneo para cancelación (MED-03).
+    pub scan_handles:
+        Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
 }
+
+/// MED-03: como mucho 2 escaneos hashando a la vez; el resto recibe 429.
+static SCAN_SEM: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 /// Directorio de portadas: si el staging es `<data>/staging`, usar
 /// `<data>/posters` (persistente); si no, temporal del sistema.
@@ -47,6 +53,20 @@ fn poster_dir_for(library: &Library) -> PathBuf {
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const MANIFEST_JSON: &str = include_str!("../web/manifest.json");
 const SW_JS: &str = include_str!("../web/sw.js");
+
+/// HIGH-01: ejecuta una consulta SQLite en el pool bloqueante para no
+/// estacionar workers Tokio (la conexión es `std::sync::Mutex`, I/O real).
+/// `Db` es `Clone` barato (`Arc`), así que se clona por llamada.
+pub(crate) async fn db_blocking<F, T>(db: &Db, f: F) -> anyhow::Result<T>
+where
+    F: FnOnce(&Db) -> anyhow::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let db = db.clone();
+    tokio::task::spawn_blocking(move || f(&db))
+        .await
+        .map_err(|e| anyhow::anyhow!("tarea db cancelada: {e}"))?
+}
 
 impl Gateway {
     pub fn router(store: BlobsStore, db: Db, endpoint_id: String) -> Router {
@@ -76,18 +96,19 @@ impl Gateway {
             jobs: Jobs::default(),
             mime_cache: Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             poster_dir,
+            scan_handles: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         });
 
-        // Capa de timeout de 30s en endpoints de API para protección slowloris
+        // Capa de timeout total de 30s en endpoints de API rápida
+        // (slowloris). `add-file` (hasheo de GBs) y las subidas/streams
+        // van fuera: ver abajo (MED-04).
         let api_routes = Router::new()
             .route("/files", get(api_files).patch(api_rename_file))
             .route("/info", get(api_info))
-            .route("/library/add-file", post(api_add_file))
             .route("/library/scan-folder", post(api_scan_folder))
-            .route("/library/jobs/:id", get(api_job))
+            .route("/library/jobs/:id", get(api_job).delete(api_cancel_job))
             .route("/files/:hash", delete(api_remove_file))
             .route("/storage", get(api_storage_list))
-            .route("/storage/add-file", post(api_storage_add_file))
             .route(
                 "/collections",
                 get(api_collections).post(api_create_collection),
@@ -110,20 +131,36 @@ impl Gateway {
                 std::time::Duration::from_secs(30),
             ));
 
+        // MED-04: las subidas dependen del ritmo del móvil (tailnet lenta):
+        // sin timeout total, solo inactividad entre chunks (60s).
+        let upload_routes = Router::new()
+            .route("/api/library/upload", post(api_upload))
+            .route("/api/storage/upload", post(api_storage_upload))
+            .layer(tower_http::timeout::RequestBodyTimeoutLayer::new(
+                std::time::Duration::from_secs(60),
+            ));
+
         Router::new()
             .route("/", get(index))
             .route("/manifest.json", get(manifest))
             .route("/sw.js", get(sw))
             .route("/health", get(health))
             .nest("/api", api_routes)
-            .route("/api/library/upload", post(api_upload))
-            .route("/api/storage/upload", post(api_storage_upload))
+            // `add-file`/`storage/add-file` hashean GBs y superan 30s
+            // legítimos; fuera del timeout total (antes devolvían 408
+            // aunque el import seguía en fondo).
+            .route("/api/library/add-file", post(api_add_file))
+            .route("/api/storage/add-file", post(api_storage_add_file))
+            .merge(upload_routes)
             .route("/posters/:file", get(serve_poster))
             .route("/stream/:hash", get(stream).head(stream_head))
             .route("/download/:hash", get(download).head(download_head))
             // Sin límite global de 2 MB: la subida de vídeos lo necesita.
-            // `api_upload` impone su propio tope (8 GiB) mientras escribe.
+            // `handle_multipart_upload` impone su propio tope (8 GiB) por chunks.
             .layer(DefaultBodyLimit::disable())
+            // MED-04: tope generoso de conexiones concurrentes para que
+            // subidas colgadas no agoten los workers de axum.
+            .layer(tower::limit::ConcurrencyLimitLayer::new(100))
             .with_state(state)
     }
 
@@ -295,6 +332,15 @@ struct RemoveItemQuery {
     path: String,
 }
 
+/// MED-02: paginación opcional de listados (`?limit=&offset=`, default 2000).
+#[derive(Debug, Deserialize)]
+struct ListQuery {
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: Option<i64>,
+}
+
 #[derive(Debug, Deserialize)]
 struct ReorderReq {
     #[serde(default)]
@@ -361,8 +407,17 @@ async fn api_storage_add_file(
 }
 
 /// GET /api/storage — lista solo archivos de almacenamiento (`kind=file`).
-async fn api_storage_list(State(state): State<Arc<Gateway>>) -> impl IntoResponse {
-    match state.db.list_files_by_kind(FILE_KIND_FILE) {
+async fn api_storage_list(
+    State(state): State<Arc<Gateway>>,
+    Query(q): Query<ListQuery>,
+) -> impl IntoResponse {
+    let limit = q.limit.unwrap_or(2000);
+    let offset = q.offset.unwrap_or(0);
+    match db_blocking(&state.db, move |db| {
+        db.list_files_by_kind_paged(FILE_KIND_FILE, limit, offset)
+    })
+    .await
+    {
         Ok(rows) => (StatusCode::OK, Json(rows)).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")).into_response(),
     }
@@ -411,6 +466,19 @@ async fn api_scan_folder(
         }
     };
 
+    // MED-03: como mucho 2 escaneos hashando a la vez; el resto recibe
+    // 429 sin crear job.
+    let _scan_permit = match SCAN_SEM.try_acquire() {
+        Ok(p) => p,
+        Err(_) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({"error": "ya hay un escaneo en curso, espera a que termine"})),
+            )
+                .into_response();
+        }
+    };
+
     let job_id = state.jobs.create(paths.len());
     if !paths.is_empty() {
         let lib = state.library.clone();
@@ -422,9 +490,12 @@ async fn api_scan_folder(
         // `target_collection_id`, se usa una hoja YA CREADA (verificada).
         let target_id = req.target_collection_id.trim().to_string();
         let auto_col: Option<(String, String)> = if !target_id.is_empty() {
-            match db.get_collection(&target_id) {
+            match db_blocking(&state.db, move |db| db.get_collection(&target_id)).await {
                 Ok(Some(col)) => {
-                    let kids = db.list_children(&col.id).unwrap_or_default();
+                    let col_id = col.id.clone();
+                    let kids = db_blocking(&state.db, move |db| db.list_children(&col_id))
+                        .await
+                        .unwrap_or_default();
                     if !kids.is_empty() {
                         return (
                             StatusCode::BAD_REQUEST,
@@ -462,7 +533,13 @@ async fn api_scan_folder(
                 }
             }
         } else if !req.collection_title.trim().is_empty() {
-            match db.create_collection(&req.collection_kind, &req.collection_title, "") {
+            let auto_kind = req.collection_kind.clone();
+            let auto_title = req.collection_title.clone();
+            match db_blocking(&state.db, move |db| {
+                db.create_collection(&auto_kind, &auto_title, "")
+            })
+            .await
+            {
                 Ok(root) => {
                     let target = if !req.season.trim().is_empty() {
                         let child_kind = if Db::normalize_kind(&req.collection_kind) == "movie" {
@@ -470,7 +547,14 @@ async fn api_scan_folder(
                         } else {
                             "season"
                         };
-                        match db.create_collection(child_kind, &req.season, &root.id) {
+                        let child_kind = child_kind.to_string();
+                        let season_title = req.season.clone();
+                        let root_id = root.id.clone();
+                        match db_blocking(&state.db, move |db| {
+                            db.create_collection(&child_kind, &season_title, &root_id)
+                        })
+                        .await
+                        {
                             Ok(kid) => kid.id,
                             Err(_) => root.id.clone(),
                         }
@@ -487,14 +571,22 @@ async fn api_scan_folder(
         // Devolver el id al cliente vía job? Se devuelve abajo en la respuesta
         // extendida; el worker solo adjunta.
         let auto_col_worker = auto_col.clone();
-        tokio::spawn(async move {
+        let handles = state.scan_handles.clone();
+        let jid_worker = jid.clone();
+        let handle = tokio::spawn(async move {
+            // El permiso vive lo que el worker: libera un slot al terminar.
+            let _permit = _scan_permit;
             let mut pos: i64 = 0;
             for p in paths {
                 pos += 1;
                 match lib.add_file(&p, Some(&base)).await {
                     Ok(a) => {
                         if let Some((cid, _)) = &auto_col_worker {
-                            let _ = db.add_item(cid, &a.path, "", "", pos);
+                            let cid = cid.clone();
+                            let apath = a.path.clone();
+                            let _ =
+                                db_blocking(&db, move |db| db.add_item(&cid, &apath, "", "", pos))
+                                    .await;
                         }
                         jobs.progress(&jid, Some(a.path), None)
                     }
@@ -511,7 +603,14 @@ async fn api_scan_folder(
                     ),
                 }
             }
+            // Limpieza del handle de cancelación al terminar.
+            handles.lock().ok().map(|mut m| m.remove(&jid_worker));
         });
+        state
+            .scan_handles
+            .lock()
+            .ok()
+            .map(|mut m| m.insert(job_id.clone(), handle));
         let collection_id = auto_col.map(|(_, root)| root).unwrap_or_default();
         return (
             StatusCode::ACCEPTED,
@@ -539,7 +638,13 @@ async fn api_rename_file(
         )
             .into_response();
     }
-    if state.db.get_by_path(&req.path).ok().flatten().is_none() {
+    let lookup_path = req.path.clone();
+    if db_blocking(&state.db, move |db| db.get_by_path(&lookup_path))
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+    {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "archivo no listado"})),
@@ -547,7 +652,9 @@ async fn api_rename_file(
             .into_response();
     }
     if let Some(t) = req.title.as_deref() {
-        match state.db.set_title(&req.path, t) {
+        let rp = req.path.clone();
+        let t = t.to_string();
+        match db_blocking(&state.db, move |db| db.set_title(&rp, &t)).await {
             Ok(true) => {}
             Ok(false) => {
                 return (
@@ -566,7 +673,8 @@ async fn api_rename_file(
         }
     }
     if let Some(w) = req.watched {
-        match state.db.set_watched(&req.path, w) {
+        let rp = req.path.clone();
+        match db_blocking(&state.db, move |db| db.set_watched(&rp, w)).await {
             Ok(true) => {}
             Ok(false) => {
                 return (
@@ -590,33 +698,26 @@ async fn api_rename_file(
 /// GET /api/collections — lista plana con nº de items propios + hijas.
 /// El frontend agrupa por `parent_id` para el árbol.
 async fn api_collections(State(state): State<Arc<Gateway>>) -> impl IntoResponse {
-    match state.db.list_collections() {
-        Ok(cols) => {
-            let out: Vec<serde_json::Value> = cols
-                .iter()
-                .map(|c| {
-                    let (n, kids) = state
-                        .db
-                        .collection_detail(&c.id)
-                        .map(|d| {
-                            d.map(|v| {
-                                (
-                                    v.items.len()
-                                        + v.children.iter().map(|k| k.items.len()).sum::<usize>(),
-                                    v.children.len(),
-                                )
-                            })
-                            .unwrap_or((0, 0))
-                        })
-                        .unwrap_or((0, 0));
-                    json!({"id": c.id, "kind": c.kind, "title": c.title,
-                           "poster_url": c.poster_url, "poster_file": c.poster_file,
-                           "created_at": c.created_at, "parent_id": c.parent_id,
-                           "pos": c.pos, "items": n, "children": kids})
-                })
-                .collect();
-            (StatusCode::OK, Json(out)).into_response()
-        }
+    // HIGH-01: lista + detalles N en el mismo hilo bloqueante, con
+    // resumen agregado (MED-02: 3 queries fijas, sin N+1).
+    match db_blocking(&state.db, |db| -> anyhow::Result<Vec<serde_json::Value>> {
+        let cols = db.list_collections()?;
+        let summary = db.collections_summary()?;
+        let out: Vec<serde_json::Value> = cols
+            .iter()
+            .map(|c| {
+                let (n, kids) = summary.get(&c.id).copied().unwrap_or((0, 0));
+                json!({"id": c.id, "kind": c.kind, "title": c.title,
+                       "poster_url": c.poster_url, "poster_file": c.poster_file,
+                       "created_at": c.created_at, "parent_id": c.parent_id,
+                       "pos": c.pos, "items": n, "children": kids})
+            })
+            .collect();
+        Ok(out)
+    })
+    .await
+    {
+        Ok(out) => (StatusCode::OK, Json(out)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": e.to_string()})),
@@ -630,9 +731,13 @@ async fn api_create_collection(
     State(state): State<Arc<Gateway>>,
     Json(req): Json<CreateCollectionReq>,
 ) -> impl IntoResponse {
-    match state
-        .db
-        .create_collection(&req.kind, &req.title, &req.parent_id)
+    let kind = req.kind.clone();
+    let title = req.title.clone();
+    let parent_id = req.parent_id.clone();
+    match db_blocking(&state.db, move |db| {
+        db.create_collection(&kind, &title, &parent_id)
+    })
+    .await
     {
         Ok(c) => (StatusCode::CREATED, Json(c)).into_response(),
         Err(e) => (
@@ -650,7 +755,13 @@ async fn api_create_child(
     Path(id): Path<String>,
     Json(req): Json<CreateChildReq>,
 ) -> impl IntoResponse {
-    match state.db.create_collection(&req.kind, &req.title, &id) {
+    let kind = req.kind.clone();
+    let title = req.title.clone();
+    match db_blocking(&state.db, move |db| {
+        db.create_collection(&kind, &title, &id)
+    })
+    .await
+    {
         Ok(c) => (StatusCode::CREATED, Json(c)).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
@@ -665,7 +776,7 @@ async fn api_collection_detail(
     State(state): State<Arc<Gateway>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state.db.collection_detail(&id) {
+    match db_blocking(&state.db, move |db| db.collection_detail(&id)).await {
         Ok(Some(d)) => (StatusCode::OK, Json(d)).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -688,7 +799,13 @@ async fn api_update_collection(
 ) -> impl IntoResponse {
     // Cada campo se actualiza por separado (dos llamadas si hacen falta).
     if let Some(t) = req.title.as_deref() {
-        match state.db.update_collection(&id, Some(t), None, None) {
+        let cid = id.clone();
+        let t = t.to_string();
+        match db_blocking(&state.db, move |db| {
+            db.update_collection(&cid, Some(&t), None, None)
+        })
+        .await
+        {
             Ok(true) => {}
             Ok(false) => {
                 return (
@@ -707,7 +824,13 @@ async fn api_update_collection(
         }
     }
     if let Some(u) = req.poster_url.as_deref() {
-        match state.db.update_collection(&id, None, Some(u), None) {
+        let cid = id.clone();
+        let u = u.to_string();
+        match db_blocking(&state.db, move |db| {
+            db.update_collection(&cid, None, Some(&u), None)
+        })
+        .await
+        {
             Ok(true) => {}
             Ok(false) => {
                 return (
@@ -726,7 +849,13 @@ async fn api_update_collection(
         }
     }
     if let Some(k) = req.kind.as_deref() {
-        match state.db.update_collection(&id, None, None, Some(k)) {
+        let cid = id.clone();
+        let k = k.to_string();
+        match db_blocking(&state.db, move |db| {
+            db.update_collection(&cid, None, None, Some(&k))
+        })
+        .await
+        {
             Ok(true) => {}
             Ok(false) => {
                 return (
@@ -744,7 +873,7 @@ async fn api_update_collection(
             }
         }
     }
-    match state.db.get_collection(&id) {
+    match db_blocking(&state.db, move |db| db.get_collection(&id)).await {
         Ok(Some(c)) => (StatusCode::OK, Json(c)).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -764,7 +893,7 @@ async fn api_delete_collection(
     State(state): State<Arc<Gateway>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state.db.delete_collection(&id) {
+    match db_blocking(&state.db, move |db| db.delete_collection(&id)).await {
         Ok(true) => (StatusCode::OK, Json(json!({"removed": true}))).into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
@@ -786,9 +915,14 @@ async fn api_add_item(
     Path(id): Path<String>,
     Json(req): Json<AddItemReq>,
 ) -> impl IntoResponse {
-    match state
-        .db
-        .add_item(&id, &req.file_path, &req.season, &req.label, req.pos)
+    let file_path = req.file_path.clone();
+    let season = req.season.clone();
+    let label = req.label.clone();
+    let pos = req.pos;
+    match db_blocking(&state.db, move |db| {
+        db.add_item(&id, &file_path, &season, &label, pos)
+    })
+    .await
     {
         Ok(()) => (StatusCode::OK, Json(json!({"added": true}))).into_response(),
         Err(e) => (
@@ -805,7 +939,8 @@ async fn api_remove_item(
     Path(id): Path<String>,
     Query(q): Query<RemoveItemQuery>,
 ) -> impl IntoResponse {
-    match state.db.remove_item(&id, &q.path) {
+    let p = q.path.clone();
+    match db_blocking(&state.db, move |db| db.remove_item(&id, &p)).await {
         Ok(true) => (StatusCode::OK, Json(json!({"removed": true}))).into_response(),
         Ok(false) => (
             StatusCode::NOT_FOUND,
@@ -827,7 +962,8 @@ async fn api_reorder_items(
     Path(id): Path<String>,
     Json(req): Json<ReorderReq>,
 ) -> impl IntoResponse {
-    match state.db.reorder_items(&id, &req.order) {
+    let order = req.order.clone();
+    match db_blocking(&state.db, move |db| db.reorder_items(&id, &order)).await {
         Ok(()) => (StatusCode::OK, Json(json!({"reordered": true}))).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
@@ -844,7 +980,8 @@ async fn api_reorder_children(
     Path(id): Path<String>,
     Json(req): Json<ReorderReq>,
 ) -> impl IntoResponse {
-    match state.db.reorder_children(&id, &req.order) {
+    let order = req.order.clone();
+    match db_blocking(&state.db, move |db| db.reorder_children(&id, &order)).await {
         Ok(()) => (StatusCode::OK, Json(json!({"reordered": true}))).into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
@@ -862,7 +999,13 @@ async fn api_upload_poster(
     Path(id): Path<String>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    if state.db.get_collection(&id).ok().flatten().is_none() {
+    let lookup = id.clone();
+    if db_blocking(&state.db, move |db| db.get_collection(&lookup))
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+    {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({"error": "colección no existe"})),
@@ -972,9 +1115,15 @@ async fn api_upload_poster(
                 .into_response();
         }
         let public = format!("/posters/{file_name}");
-        let _ = state.db.set_poster_file(&id, &public);
+        let pid = id.clone();
+        let pub_dup = public.clone();
+        let _ = db_blocking(&state.db, move |db| db.set_poster_file(&pid, &pub_dup)).await;
         // La subida local tiene prioridad: limpia la URL externa.
-        let _ = state.db.update_collection(&id, None, Some(""), None);
+        let pid = id.clone();
+        let _ = db_blocking(&state.db, move |db| {
+            db.update_collection(&pid, None, Some(""), None)
+        })
+        .await;
         return (StatusCode::OK, Json(json!({"poster": public}))).into_response();
     }
     (
@@ -1027,9 +1176,29 @@ async fn serve_poster(
 /// POST /api/library/upload (multipart, campo `file`) — subida directa
 /// desde el navegador o el móvil.
 /// BLOCK-03: Utiliza staging en directorio persistente con guardia RAII TempStagedFile.
-async fn api_upload(
+async fn api_upload(State(state): State<Arc<Gateway>>, multipart: Multipart) -> impl IntoResponse {
+    handle_multipart_upload(&state, multipart, "", false).await
+}
+
+/// POST /api/storage/upload (multipart, campo `file`) — subida directa
+/// al apartado Almacenamiento (cualquier tipo, tope 8 GiB).
+/// Reutiliza el mismo staging persistente + guardia RAII que streaming.
+async fn api_storage_upload(
     State(state): State<Arc<Gateway>>,
+    multipart: Multipart,
+) -> impl IntoResponse {
+    handle_multipart_upload(&state, multipart, "storage-", true).await
+}
+
+/// HIGH-02: núcleo común de subida multipart (las dos rutas diferían solo
+/// en el prefijo del temporal y en la llamada final a `Library`).
+/// `prefix` se antepone al nombre del temporal; `storage` elige la rama
+/// `kind=file` (`add_storage_upload`) o `media` (`add_upload`).
+async fn handle_multipart_upload(
+    state: &Gateway,
     mut multipart: Multipart,
+    prefix: &str,
+    storage: bool,
 ) -> impl IntoResponse {
     const MAX_UPLOAD: u64 = 8 * 1024 * 1024 * 1024;
     let staging_dir = state.library.staging_dir();
@@ -1060,7 +1229,7 @@ async fn api_upload(
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "archivo".into());
-        let staged_path = staging_dir.join(format!("{}-{}-{}", now, count, safe_name));
+        let staged_path = staging_dir.join(format!("{prefix}{now}-{count}-{safe_name}"));
         let staged = crate::library::TempStagedFile::new(staged_path);
 
         let mut out = match tokio::fs::File::create(staged.path()).await {
@@ -1107,114 +1276,12 @@ async fn api_upload(
         }
         let _ = out.flush().await;
         drop(out);
-        match state.library.add_upload(&name, staged.path()).await {
-            Ok(a) => {
-                staged.commit();
-                return (
-                    StatusCode::OK,
-                    Json(json!({"path": a.path, "hash": a.hash, "size": a.size, "mime": a.mime})),
-                )
-                    .into_response();
-            }
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": e.to_string()})),
-                )
-                    .into_response();
-            }
-        }
-    }
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({"error": "falta el campo `file` (multipart/form-data)"})),
-    )
-        .into_response()
-}
-
-/// POST /api/storage/upload (multipart, campo `file`) — subida directa
-/// al apartado Almacenamiento (cualquier tipo, tope 8 GiB).
-/// Reutiliza el mismo staging persistente + guardia RAII que streaming.
-async fn api_storage_upload(
-    State(state): State<Arc<Gateway>>,
-    mut multipart: Multipart,
-) -> impl IntoResponse {
-    const MAX_UPLOAD: u64 = 8 * 1024 * 1024 * 1024;
-    let staging_dir = state.library.staging_dir();
-    if let Err(e) = tokio::fs::create_dir_all(staging_dir).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": format!("no se pudo preparar la subida: {e}")})),
-        )
-            .into_response();
-    }
-    while let Ok(Some(mut field)) = multipart.next_field().await {
-        let name = field
-            .file_name()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "archivo".into());
-        if field.name() != Some("file") {
-            continue;
-        }
-
-        static STORAGE_UPLOAD_COUNTER: std::sync::atomic::AtomicU64 =
-            std::sync::atomic::AtomicU64::new(1);
-        let count = STORAGE_UPLOAD_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let safe_name = PathBuf::from(&name)
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "archivo".into());
-        let staged_path = staging_dir.join(format!("storage-{now}-{count}-{safe_name}"));
-        let staged = crate::library::TempStagedFile::new(staged_path);
-
-        let mut out = match tokio::fs::File::create(staged.path()).await {
-            Ok(f) => f,
-            Err(e) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("no se pudo recibir la subida: {e}")})),
-                )
-                    .into_response();
-            }
+        let imported = if storage {
+            state.library.add_storage_upload(&name, staged.path()).await
+        } else {
+            state.library.add_upload(&name, staged.path()).await
         };
-        let mut written: u64 = 0;
-        loop {
-            match field.chunk().await {
-                Ok(Some(chunk)) => {
-                    written += chunk.len() as u64;
-                    if written > MAX_UPLOAD {
-                        return (
-                            StatusCode::PAYLOAD_TOO_LARGE,
-                            Json(json!({"error": "archivo demasiado grande (tope 8 GiB)"})),
-                        )
-                            .into_response();
-                    }
-                    use tokio::io::AsyncWriteExt;
-                    if let Err(e) = out.write_all(&chunk).await {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({"error": format!("error al guardar la subida: {e}")})),
-                        )
-                            .into_response();
-                    }
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({"error": format!("subida interrumpida: {e}")})),
-                    )
-                        .into_response();
-                }
-            }
-        }
-        let _ = out.flush().await;
-        drop(out);
-        match state.library.add_storage_upload(&name, staged.path()).await {
+        match imported {
             Ok(a) => {
                 staged.commit();
                 return (
@@ -1240,17 +1307,46 @@ async fn api_storage_upload(
 }
 
 /// GET /api/library/jobs/:id — progreso del escaneo (lectura, abierto).
-async fn api_job(State(state): State<Arc<Gateway>>, Path(id): Path<String>) -> impl IntoResponse {
-    match state.jobs.get(&id) {
-        Some(j) => (
+/// Por defecto vista resumida (conteos, sin clonar vectores); `?full=1`
+/// devuelve `added`/`errors` completos (MED-03).
+#[derive(Debug, Deserialize)]
+struct JobQuery {
+    #[serde(default)]
+    full: Option<String>,
+}
+
+async fn api_job(
+    State(state): State<Arc<Gateway>>,
+    Path(id): Path<String>,
+    Query(q): Query<JobQuery>,
+) -> impl IntoResponse {
+    if q.full.as_deref() == Some("1") {
+        return match state.jobs.get(&id) {
+            Some(j) => (
+                StatusCode::OK,
+                Json(json!(JobView {
+                    id: j.id,
+                    status: j.status,
+                    total: j.total,
+                    done: j.done,
+                    added: j.added,
+                    errors: j.errors,
+                })),
+            )
+                .into_response(),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "job desconocido"})),
+            )
+                .into_response(),
+        };
+    }
+    match state.jobs.summary(&id) {
+        Some(s) => (
             StatusCode::OK,
-            Json(json!(JobView {
-                id: j.id,
-                status: j.status,
-                total: j.total,
-                done: j.done,
-                added: j.added,
-                errors: j.errors,
+            Json(json!({
+                "id": s.id, "status": s.status, "total": s.total, "done": s.done,
+                "added_count": s.added_count, "errors_count": s.errors_count,
             })),
         )
             .into_response(),
@@ -1259,6 +1355,39 @@ async fn api_job(State(state): State<Arc<Gateway>>, Path(id): Path<String>) -> i
             Json(json!({"error": "job desconocido"})),
         )
             .into_response(),
+    }
+}
+
+/// DELETE /api/library/jobs/:id — cancela un escaneo en curso (MED-03).
+/// Aborta el worker (los blobs a medio hashear los recupera el GC de 60s)
+/// y marca el job como `error` para que el poll termine.
+async fn api_cancel_job(
+    State(state): State<Arc<Gateway>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.jobs.get(&id) {
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "job desconocido"})),
+        )
+            .into_response(),
+        Some(j) if j.status != "running" => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "el job ya terminó"})),
+        )
+            .into_response(),
+        Some(_) => {
+            if let Some(h) = state
+                .scan_handles
+                .lock()
+                .ok()
+                .and_then(|mut m| m.remove(&id))
+            {
+                h.abort();
+            }
+            state.jobs.fail(&id, "cancelado por el usuario".into());
+            (StatusCode::OK, Json(json!({"cancelled": true}))).into_response()
+        }
     }
 }
 
@@ -1336,22 +1465,32 @@ async fn sw() -> impl IntoResponse {
 
 /// Lista de vídeos del apartado Streaming (`kind=media`).
 /// Almacenamiento va en `GET /api/storage` para no mezclar.
-async fn api_files(State(state): State<Arc<Gateway>>) -> impl IntoResponse {
-    match state.db.list_files_by_kind(FILE_KIND_MEDIA) {
+async fn api_files(
+    State(state): State<Arc<Gateway>>,
+    Query(q): Query<ListQuery>,
+) -> impl IntoResponse {
+    let limit = q.limit.unwrap_or(2000);
+    let offset = q.offset.unwrap_or(0);
+    match db_blocking(&state.db, move |db| {
+        db.list_files_by_kind_paged(FILE_KIND_MEDIA, limit, offset)
+    })
+    .await
+    {
         Ok(rows) => (StatusCode::OK, Json(rows)).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")).into_response(),
     }
 }
 
 async fn api_info(State(state): State<Arc<Gateway>>) -> impl IntoResponse {
-    let all = state.db.list_files().unwrap_or_default();
-    let media = all.iter().filter(|r| r.kind != FILE_KIND_FILE).count();
-    let storage = all.iter().filter(|r| r.kind == FILE_KIND_FILE).count();
+    // MED-02: conteos agregados sin cargar todas las filas.
+    let (total, media, storage) = db_blocking(&state.db, |db| db.count_files())
+        .await
+        .unwrap_or_default();
     (
         StatusCode::OK,
         Json(json!({
             "endpoint_id": state.endpoint_id,
-            "files": all.len(),
+            "files": total,
             "media": media,
             "storage": storage,
             "version": env!("CARGO_PKG_VERSION"),
@@ -1360,14 +1499,17 @@ async fn api_info(State(state): State<Arc<Gateway>>) -> impl IntoResponse {
         .into_response()
 }
 
-/// MIME registrado en la DB para un hash, con caché en RAM (HIGH-02).
-fn mime_for(state: &Gateway, hash_s: &str) -> String {
+/// MIME registrado en la DB para un hash, con caché en RAM.
+/// La caché está acotada por el nº de archivos en DB (una entrada corta por
+/// hash); el `SELECT` del miss va al pool bloqueante (HIGH-01).
+async fn mime_for(state: &Gateway, hash_s: &str) -> String {
     if let Ok(cache) = state.mime_cache.read() {
         if let Some(m) = cache.get(hash_s) {
             return m.clone();
         }
     }
-    let mime = match state.db.get_by_hash(hash_s) {
+    let h = hash_s.to_string();
+    let mime = match db_blocking(&state.db, move |db| db.get_by_hash(&h)).await {
         Ok(Some(row)) if !row.mime.is_empty() => row.mime,
         _ => "application/octet-stream".to_string(),
     };
@@ -1375,6 +1517,64 @@ fn mime_for(state: &Gateway, hash_s: &str) -> String {
         cache.insert(hash_s.to_string(), mime.clone());
     }
     mime
+}
+
+/// HIGH-02: `has + status` centralizados (los 4 endpoints de
+/// stream/download repetían este bloque; `BlobReader` no soporta
+/// `SeekFrom::End`, el tamaño sale de `status`).
+async fn blob_total_checked(
+    store: &BlobsStore,
+    hash: Hash,
+) -> Result<u64, axum::response::Response> {
+    if !store.blobs().has(hash).await.unwrap_or(false) {
+        return Err((StatusCode::NOT_FOUND, "blob no disponible en este nodo").into_response());
+    }
+    match store.blobs().status(hash).await {
+        Ok(iroh_blobs::api::blobs::BlobStatus::Complete { size }) => Ok(size),
+        Ok(_) => Err((StatusCode::NOT_FOUND, "blob parcial en este nodo").into_response()),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, format!("status: {e}")).into_response()),
+    }
+}
+
+/// HIGH-02: cuerpo por rango con backpressure (`seek + take + ReaderStream
+/// 64 KiB`, sin `collect` intermedio).
+async fn range_body(store: &BlobsStore, hash: Hash, start: u64, len: u64) -> Result<Body, String> {
+    let mut reader = store.blobs().reader(hash);
+    reader
+        .seek(std::io::SeekFrom::Start(start))
+        .await
+        .map_err(|e| format!("seek: {e}"))?;
+    let limited = reader.take(len);
+    Ok(Body::from_stream(ReaderStream::with_capacity(
+        limited,
+        64 * 1024,
+    )))
+}
+
+/// HIGH-02: cabeceras base (`Accept-Ranges`, `Cache-Control`, longitud y
+/// tipo; `Content-Disposition` solo en download). `cache` es `no-store`
+/// (stream) o `private, max-age=3600` (download).
+fn base_stream_headers(
+    mime: &str,
+    len: u64,
+    cache: &str,
+    disposition: Option<String>,
+) -> HeaderMap {
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    resp_headers.insert(header::CACHE_CONTROL, cache.parse().unwrap());
+    resp_headers.insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
+    resp_headers.insert(
+        header::CONTENT_TYPE,
+        mime.parse()
+            .unwrap_or_else(|_| "application/octet-stream".parse().unwrap()),
+    );
+    if let Some(d) = disposition {
+        if let Ok(v) = d.parse() {
+            resp_headers.insert(header::CONTENT_DISPOSITION, v);
+        }
+    }
+    resp_headers
 }
 
 /// HEAD /stream/<hash>: mismos headers que GET pero sin body.
@@ -1386,27 +1586,16 @@ async fn stream_head(
     let Some(hash) = parse_blob_hash(&hash_s) else {
         return (StatusCode::BAD_REQUEST, "hash inválido").into_response();
     };
-    if !state.store.blobs().has(hash).await.unwrap_or(false) {
-        return (StatusCode::NOT_FOUND, "blob no disponible en este nodo").into_response();
-    }
-    let total = match state.store.blobs().status(hash).await {
-        Ok(iroh_blobs::api::blobs::BlobStatus::Complete { size }) => size,
-        Ok(_) => {
-            return (StatusCode::NOT_FOUND, "blob parcial en este nodo").into_response();
-        }
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("status: {e}")).into_response();
-        }
+    let total = match blob_total_checked(&state.store, hash).await {
+        Ok(t) => t,
+        Err(r) => return r,
     };
-    let mime = mime_for(&state, &hash_s);
-    let mut resp_headers = HeaderMap::new();
-    resp_headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
-    resp_headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
-    resp_headers.insert(header::CONTENT_LENGTH, total.to_string().parse().unwrap());
-    if let Ok(v) = mime.parse() {
-        resp_headers.insert(header::CONTENT_TYPE, v);
-    }
-    (StatusCode::OK, resp_headers).into_response()
+    let mime = mime_for(&state, &hash_s).await;
+    (
+        StatusCode::OK,
+        base_stream_headers(&mime, total, "no-store", None),
+    )
+        .into_response()
 }
 
 /// GET /stream/<hash-blake3-hex> con soporte `Range: bytes=start-end`.
@@ -1422,21 +1611,11 @@ async fn stream(
     let Some(hash) = parse_blob_hash(&hash_s) else {
         return (StatusCode::BAD_REQUEST, "hash inválido").into_response();
     };
-    if !state.store.blobs().has(hash).await.unwrap_or(false) {
-        return (StatusCode::NOT_FOUND, "blob no disponible en este nodo").into_response();
-    }
-
     // Tamaño total vía status (BlobReader no soporta SeekFrom::End).
-    let total = match state.store.blobs().status(hash).await {
-        Ok(iroh_blobs::api::blobs::BlobStatus::Complete { size }) => size,
-        Ok(_) => {
-            return (StatusCode::NOT_FOUND, "blob parcial en este nodo").into_response();
-        }
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("status: {e}")).into_response();
-        }
+    let total = match blob_total_checked(&state.store, hash).await {
+        Ok(t) => t,
+        Err(r) => return r,
     };
-    let mut reader = state.store.blobs().reader(hash);
 
     let (start, end) = match parse_range(headers.get(header::RANGE), total) {
         Ok(r) => r,
@@ -1444,23 +1623,13 @@ async fn stream(
     };
     let len = end - start + 1;
 
-    if let Err(e) = reader.seek(std::io::SeekFrom::Start(start)).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("seek: {e}")).into_response();
-    }
-    let limited = reader.take(len);
-    let stream = ReaderStream::with_capacity(limited, 64 * 1024);
-    let body = Body::from_stream(stream);
+    let body = match range_body(&state.store, hash, start, len).await {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
 
-    let mut resp_headers = HeaderMap::new();
-    resp_headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
-    resp_headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
-    resp_headers.insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
-    let mime = mime_for(&state, &hash_s);
-    resp_headers.insert(
-        header::CONTENT_TYPE,
-        mime.parse()
-            .unwrap_or_else(|_| "application/octet-stream".parse().unwrap()),
-    );
+    let mime = mime_for(&state, &hash_s).await;
+    let mut resp_headers = base_stream_headers(&mime, len, "no-store", None);
 
     if headers.contains_key(header::RANGE) {
         resp_headers.insert(
@@ -1525,35 +1694,24 @@ async fn download_head(
     let Some(hash) = parse_blob_hash(&hash_s) else {
         return (StatusCode::BAD_REQUEST, "hash inválido").into_response();
     };
-    if !state.store.blobs().has(hash).await.unwrap_or(false) {
-        return (StatusCode::NOT_FOUND, "blob no disponible en este nodo").into_response();
-    }
-    let total = match state.store.blobs().status(hash).await {
-        Ok(iroh_blobs::api::blobs::BlobStatus::Complete { size }) => size,
-        Ok(_) => {
-            return (StatusCode::NOT_FOUND, "blob parcial en este nodo").into_response();
-        }
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("status: {e}")).into_response();
-        }
+    let total = match blob_total_checked(&state.store, hash).await {
+        Ok(t) => t,
+        Err(r) => return r,
     };
-    let mime = mime_for(&state, &hash_s);
-    let row = state.db.get_by_hash(&hash_s).ok().flatten();
+    let mime = mime_for(&state, &hash_s).await;
+    let h = hash_s.clone();
+    let row = db_blocking(&state.db, move |db| db.get_by_hash(&h))
+        .await
+        .ok()
+        .flatten();
     let filename = row.map(|r| r.path).unwrap_or_else(|| "archivo".into());
     let want_inline = q.inline.as_deref() == Some("1") && is_previewable_mime(&mime);
-    let mut resp_headers = HeaderMap::new();
-    resp_headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
-    resp_headers.insert(
-        header::CACHE_CONTROL,
-        "private, max-age=3600".parse().unwrap(),
+    let resp_headers = base_stream_headers(
+        &mime,
+        total,
+        "private, max-age=3600",
+        Some(content_disposition_value(&filename, want_inline)),
     );
-    resp_headers.insert(header::CONTENT_LENGTH, total.to_string().parse().unwrap());
-    if let Ok(v) = mime.parse() {
-        resp_headers.insert(header::CONTENT_TYPE, v);
-    }
-    if let Ok(v) = content_disposition_value(&filename, want_inline).parse() {
-        resp_headers.insert(header::CONTENT_DISPOSITION, v);
-    }
     (StatusCode::OK, resp_headers).into_response()
 }
 
@@ -1570,53 +1728,34 @@ async fn download(
     let Some(hash) = parse_blob_hash(&hash_s) else {
         return (StatusCode::BAD_REQUEST, "hash inválido").into_response();
     };
-    if !state.store.blobs().has(hash).await.unwrap_or(false) {
-        return (StatusCode::NOT_FOUND, "blob no disponible en este nodo").into_response();
-    }
-    let total = match state.store.blobs().status(hash).await {
-        Ok(iroh_blobs::api::blobs::BlobStatus::Complete { size }) => size,
-        Ok(_) => {
-            return (StatusCode::NOT_FOUND, "blob parcial en este nodo").into_response();
-        }
-        Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("status: {e}")).into_response();
-        }
+    let total = match blob_total_checked(&state.store, hash).await {
+        Ok(t) => t,
+        Err(r) => return r,
     };
-    let mut reader = state.store.blobs().reader(hash);
     let (start, end) = match parse_range(headers.get(header::RANGE), total) {
         Ok(r) => r,
         Err(err) => return err.into_response(),
     };
     let len = end - start + 1;
-    if let Err(e) = reader.seek(std::io::SeekFrom::Start(start)).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("seek: {e}")).into_response();
-    }
-    let limited = reader.take(len);
-    let stream = ReaderStream::with_capacity(limited, 64 * 1024);
-    let body = Body::from_stream(stream);
+    let body = match range_body(&state.store, hash, start, len).await {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
 
-    let mime = mime_for(&state, &hash_s);
-    let row = state.db.get_by_hash(&hash_s).ok().flatten();
+    let mime = mime_for(&state, &hash_s).await;
+    let h = hash_s.clone();
+    let row = db_blocking(&state.db, move |db| db.get_by_hash(&h))
+        .await
+        .ok()
+        .flatten();
     let filename = row.map(|r| r.path).unwrap_or_else(|| "archivo".into());
     let want_inline = q.inline.as_deref() == Some("1") && is_previewable_mime(&mime);
 
-    let mut resp_headers = HeaderMap::new();
-    resp_headers.insert(header::ACCEPT_RANGES, "bytes".parse().unwrap());
-    resp_headers.insert(
-        header::CACHE_CONTROL,
-        "private, max-age=3600".parse().unwrap(),
-    );
-    resp_headers.insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap());
-    resp_headers.insert(
-        header::CONTENT_TYPE,
-        mime.parse()
-            .unwrap_or_else(|_| "application/octet-stream".parse().unwrap()),
-    );
-    resp_headers.insert(
-        header::CONTENT_DISPOSITION,
-        content_disposition_value(&filename, want_inline)
-            .parse()
-            .unwrap_or_else(|_| "attachment".parse().unwrap()),
+    let mut resp_headers = base_stream_headers(
+        &mime,
+        len,
+        "private, max-age=3600",
+        Some(content_disposition_value(&filename, want_inline)),
     );
 
     if headers.contains_key(header::RANGE) {
@@ -2366,6 +2505,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_job_resumen_y_cancel() -> anyhow::Result<()> {
+        // MED-03: vista resumida por defecto, `?full=1` completa y
+        // DELETE (404 desconocido, 409 ya terminado).
+        use iroh_blobs::store::mem::MemStore;
+        let mem = MemStore::new();
+        let store: BlobsStore = mem.into();
+        let db = Db::open_in_memory()?;
+        let (base, _h) = Gateway::serve_loopback(store, db, "jobs-test".into()).await?;
+        let client = reqwest::Client::new();
+        let r = client
+            .get(format!("{base}/api/library/jobs/9999"))
+            .send()
+            .await?;
+        assert_eq!(r.status(), 404);
+        let r = client
+            .delete(format!("{base}/api/library/jobs/9999"))
+            .send()
+            .await?;
+        assert_eq!(r.status(), 404);
+        // Carpeta vacía → job total 0, terminado al instante.
+        let dir = tempfile::tempdir()?;
+        let dir_s = dir.path().to_string_lossy().to_string();
+        let body = client
+            .post(format!("{base}/api/library/scan-folder"))
+            .body(format!(
+                "{{\"path\":{},\"recursive\":false}}",
+                serde_json::to_string(&dir_s)?
+            ))
+            .header("Content-Type", "application/json")
+            .send()
+            .await?
+            .text()
+            .await?;
+        let v: serde_json::Value = serde_json::from_str(&body)?;
+        let job_id = v["job_id"].as_str().unwrap();
+        let body = client
+            .get(format!("{base}/api/library/jobs/{job_id}"))
+            .send()
+            .await?
+            .text()
+            .await?;
+        let j: serde_json::Value = serde_json::from_str(&body)?;
+        assert_eq!(j["status"], "done");
+        assert_eq!(j["done"], 0);
+        assert!(j.get("added").is_none());
+        let body = client
+            .get(format!("{base}/api/library/jobs/{job_id}?full=1"))
+            .send()
+            .await?
+            .text()
+            .await?;
+        let f: serde_json::Value = serde_json::from_str(&body)?;
+        assert!(f["added"].as_array().is_some());
+        let r = client
+            .delete(format!("{base}/api/library/jobs/{job_id}"))
+            .send()
+            .await?;
+        assert_eq!(r.status(), 409);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn api_add_scan_y_remove_desde_loopback() -> anyhow::Result<()> {
         use iroh_blobs::store::mem::MemStore;
         let mem = MemStore::new();
@@ -2431,7 +2632,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         };
         assert_eq!(job["done"], 3);
-        assert!(job["errors"].as_array().unwrap().is_empty());
+        assert_eq!(job["errors_count"], 0);
 
         // La lista contiene cap01 (individual) + T1/cap* (scan con prefijo).
         let body = client

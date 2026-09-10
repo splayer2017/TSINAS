@@ -2997,19 +2997,9 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "tower",
  "tower-http 0.5.2",
  "tracing",
-]
-
-[[package]]
-name = "p2p-nube-vault"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "p2p-nube-core",
- "serde",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -4420,6 +4410,7 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",

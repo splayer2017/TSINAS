@@ -18,7 +18,6 @@ No hay CI, lint ni codegen. Detalle de flujos en `README.md` (modo Dev, celular,
 
 - `crates/core`: `Node` (endpoint+router), `Db` (SQLite), `Gateway` (UI+API+stream), `tailnet`. Fuente de verdad = `iroh-docs`; SQLite es solo proyección.
 - `crates/core/web`: UI embebida por `include_str!` (`index.html`, `manifest.json`, `sw.js`). Sin build npm: editar directo.
-- `crates/vault`: módulo MVP (`Manifest`, `SharedFile`, `Policy`).
 - `crates/cli`: binario `p2p-serve` (único entrypoint ejecutable).
 
 ## Versiones pinnadas (no subir por separado)

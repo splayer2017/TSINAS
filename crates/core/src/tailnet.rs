@@ -1,49 +1,30 @@
-use std::process::Command;
+/// IP tailnet (100.x) de este dispositivo, vía CLI `tailscale ip -4`.
+/// En MVP exigimos `tailscaled` instalado y logueado; no embebemos tsnet.
+/// Variante síncrona: solo para el arranque del CLI (10–50 ms puntuales).
+pub fn tailnet_ipv4() -> anyhow::Result<String> {
+    let out = std::process::Command::new("tailscale")
+        .args(["ip", "-4"])
+        .output()?;
+    parse_ipv4_out(&out.stdout, &out.stderr, out.status.success())
+}
 
-/// IP tailnet (100.x) de este dispositivo, vía CLI `tailscale ip -4` asíncrono (MED-02).
+/// Variante asíncrona (no bloquea workers Tokio).
 pub async fn tailnet_ipv4_async() -> anyhow::Result<String> {
     let out = tokio::process::Command::new("tailscale")
         .args(["ip", "-4"])
         .output()
         .await?;
-    if !out.status.success() {
-        anyhow::bail!(
-            "`tailscale ip -4` falló: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    let ip = String::from_utf8(out.stdout)?.trim().to_string();
-    if ip.is_empty() {
-        anyhow::bail!("sin IP tailnet (¿tailscale down?)");
-    }
-    Ok(ip)
+    parse_ipv4_out(&out.stdout, &out.stderr, out.status.success())
 }
 
-/// Nombre MagicDNS asíncrono (p.ej. `pc-fesb.tailxxx.ts.net`), si está disponible (MED-02).
-pub async fn magic_dns_async() -> Option<String> {
-    let out = tokio::process::Command::new("tailscale")
-        .args(["status", "--json"])
-        .output()
-        .await
-        .ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    v.get("Self")?
-        .get("DNSName")?
-        .as_str()
-        .map(|s| s.trim_end_matches('.').to_string())
-}
-
-/// IP tailnet (100.x) de este dispositivo, vía CLI `tailscale ip -4`.
-/// En MVP exigimos `tailscaled` instalado y logueado; no embebemos tsnet.
-pub fn tailnet_ipv4() -> anyhow::Result<String> {
-    let out = Command::new("tailscale").args(["ip", "-4"]).output()?;
-    if !out.status.success() {
+fn parse_ipv4_out(stdout: &[u8], stderr: &[u8], success: bool) -> anyhow::Result<String> {
+    if !success {
         anyhow::bail!(
             "`tailscale ip -4` falló: {}",
-            String::from_utf8_lossy(&out.stderr)
+            String::from_utf8_lossy(stderr)
         );
     }
-    let ip = String::from_utf8(out.stdout)?.trim().to_string();
+    let ip = String::from_utf8(stdout.to_vec())?.trim().to_string();
     if ip.is_empty() {
         anyhow::bail!("sin IP tailnet (¿tailscale down?)");
     }
@@ -51,12 +32,27 @@ pub fn tailnet_ipv4() -> anyhow::Result<String> {
 }
 
 /// Nombre MagicDNS (p.ej. `pc-fesb.tailxxx.ts.net`), si está disponible.
+/// Variante síncrona: solo para el arranque del CLI.
 pub fn magic_dns() -> Option<String> {
-    let out = Command::new("tailscale")
+    let out = std::process::Command::new("tailscale")
         .args(["status", "--json"])
         .output()
         .ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    parse_dns_json(&out.stdout)
+}
+
+/// Variante asíncrona (no bloquea workers Tokio).
+pub async fn magic_dns_async() -> Option<String> {
+    let out = tokio::process::Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+        .await
+        .ok()?;
+    parse_dns_json(&out.stdout)
+}
+
+fn parse_dns_json(stdout: &[u8]) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(stdout).ok()?;
     v.get("Self")?
         .get("DNSName")?
         .as_str()

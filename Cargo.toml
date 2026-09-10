@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/vault", "crates/cli"]
+members = ["crates/core", "crates/cli"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -12,6 +12,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 axum = { version = "0.7", features = ["tokio", "multipart"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
+tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.5", features = ["cors", "timeout"] }
 bytes = "1"
 sha2 = "0.10"

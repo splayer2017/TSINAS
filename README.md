@@ -12,7 +12,6 @@ TSINAS es tu baúl personal: el PC Linux aloja y Android reproduce por streaming
 
 - `crates/core`: `Node` (endpoint+router 3 protocolos), `Policy`, `Db`, `Gateway` HTTP Range en loopback, `tailnet` helpers.
 - `crates/core/web`: UI web embebida (`index.html` + `manifest.json` + `sw.js`, sin build de npm).
-- `crates/vault`: módulo MVP (`Manifest`, `SharedFile`).
 - `crates/cli`: binario `p2p-serve` para pruebas manuales con archivos reales.
 
 ## Cómo probar correctamente

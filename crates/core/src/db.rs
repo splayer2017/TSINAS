@@ -1,5 +1,6 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -261,6 +262,14 @@ fn collection_from(r: &rusqlite::Row) -> rusqlite::Result<Collection> {
 }
 
 impl Db {
+    /// Acceso a la conexión con error en vez de pánico (HIGH-01): convierte
+    /// un mutex envenenado en `Err` recuperable en lugar de tumbar el handler.
+    fn conn(&self) -> anyhow::Result<std::sync::MutexGuard<'_, Connection>> {
+        self.inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("db bloqueada (mutex envenenado)"))
+    }
+
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -282,7 +291,7 @@ impl Db {
 
     pub fn upsert_file(&self, row: &FileRow) -> anyhow::Result<()> {
         let kind = normalize_file_kind(&row.kind);
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO files(path,hash,size,mime,policy,host_id,tag,title,watched,kind)
              VALUES(?,?,?,?,?,?,?,?,?,?)
@@ -309,14 +318,14 @@ impl Db {
     /// Recorta a 128 caracteres. Vacío = volver al basename.
     pub fn set_title(&self, path: &str, title: &str) -> anyhow::Result<bool> {
         let t: String = title.trim().chars().take(128).collect();
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let n = conn.execute("UPDATE files SET title=? WHERE path=?", params![t, path])?;
         Ok(n > 0)
     }
 
     /// Marca/desmarca un archivo como visto. Devuelve `true` si existía.
     pub fn set_watched(&self, path: &str, watched: bool) -> anyhow::Result<bool> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let n = conn.execute(
             "UPDATE files SET watched=? WHERE path=?",
             params![i64::from(watched), path],
@@ -325,7 +334,7 @@ impl Db {
     }
 
     pub fn list_files(&self) -> anyhow::Result<Vec<FileRow>> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT path,hash,size,mime,policy,host_id,tag,title,watched,kind FROM files ORDER BY path",
         )?;
@@ -337,19 +346,54 @@ impl Db {
 
     /// Lista solo un kind (`media` = streaming, `file` = almacenamiento).
     pub fn list_files_by_kind(&self, kind: &str) -> anyhow::Result<Vec<FileRow>> {
+        self.list_files_by_kind_paged(kind, 10_000, 0)
+    }
+
+    /// MED-02: listado con paginación (`?limit=&offset=`). Límites acotados
+    /// para no serializar MBs con catálogos grandes (FUT-03).
+    pub fn list_files_by_kind_paged(
+        &self,
+        kind: &str,
+        limit: i64,
+        offset: i64,
+    ) -> anyhow::Result<Vec<FileRow>> {
         let kind = normalize_file_kind(kind);
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT path,hash,size,mime,policy,host_id,tag,title,watched,kind FROM files WHERE kind=? ORDER BY path",
+            "SELECT path,hash,size,mime,policy,host_id,tag,title,watched,kind FROM files WHERE kind=? ORDER BY path LIMIT ? OFFSET ?",
         )?;
         let rows = stmt
-            .query_map([kind], row_from)?
+            .query_map(
+                params![kind, limit.clamp(1, 10_000), offset.max(0)],
+                row_from,
+            )?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
 
+    /// MED-02: conteos baratos para `GET /api/info` sin cargar todas las filas.
+    /// Devuelve `(total, media, storage)`.
+    pub fn count_files(&self) -> anyhow::Result<(i64, i64, i64)> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare("SELECT kind, COUNT(*) FROM files GROUP BY kind")?;
+        let mut total = 0;
+        let mut media = 0;
+        let mut storage = 0;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        for r in rows {
+            let (kind, n) = r?;
+            total += n;
+            if normalize_file_kind(&kind) == FILE_KIND_FILE {
+                storage += n;
+            } else {
+                media += n;
+            }
+        }
+        Ok((total, media, storage))
+    }
+
     pub fn get_by_hash(&self, hash: &str) -> anyhow::Result<Option<FileRow>> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT path,hash,size,mime,policy,host_id,tag,title,watched,kind FROM files WHERE hash=?",
         )?;
@@ -358,7 +402,7 @@ impl Db {
     }
 
     pub fn get_by_path(&self, path: &str) -> anyhow::Result<Option<FileRow>> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT path,hash,size,mime,policy,host_id,tag,title,watched,kind FROM files WHERE path=?",
         )?;
@@ -367,7 +411,7 @@ impl Db {
     }
 
     pub fn get_rows_by_hash(&self, hash: &str) -> anyhow::Result<Vec<FileRow>> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT path,hash,size,mime,policy,host_id,tag,title,watched,kind FROM files WHERE hash=?",
         )?;
@@ -380,7 +424,7 @@ impl Db {
     /// Borra la fila por hash. Devuelve `true` si existía.
     /// Limpia también sus items de colección (huérfanos).
     pub fn delete_by_hash(&self, hash: &str) -> anyhow::Result<bool> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let paths: Vec<String> = conn
             .prepare("SELECT path FROM files WHERE hash=?")?
             .query_map([hash], |r| r.get(0))?
@@ -394,21 +438,21 @@ impl Db {
 
     /// Borra la fila por path. Devuelve `true` si existía.
     pub fn delete_by_path(&self, path: &str) -> anyhow::Result<bool> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let _ = conn.execute("DELETE FROM collection_items WHERE file_path=?", [path]);
         let n = conn.execute("DELETE FROM files WHERE path=?", [path])?;
         Ok(n > 0)
     }
 
     pub fn get_setting(&self, key: &str) -> anyhow::Result<Option<String>> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare("SELECT val FROM settings WHERE key=?")?;
         let mut rows = stmt.query_map([key], |r| r.get(0))?;
         Ok(rows.next().transpose()?)
     }
 
     pub fn set_setting(&self, key: &str, val: &str) -> anyhow::Result<()> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         conn.execute(
             "INSERT INTO settings(key, val) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET val=excluded.val",
             params![key, val],
@@ -458,10 +502,12 @@ impl Db {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as i64)
             .unwrap_or(0);
-        // id corto único sin deps externas: nanos + contador.
+        // id único sin deps externas: nanos completos + pid + contador.
+        // `Relaxed` basta (solo unicidad local); sin máscaras que recorten
+        // el espacio a 40 bits (MIN-05).
         static CTR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let c = CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let id = format!("c{:x}{:x}", (now as u64) & 0xffffff, c & 0xffff);
+        let id = format!("c{:x}-{:x}-{}", now as u64, c, std::process::id());
         let col = Collection {
             id,
             kind,
@@ -472,7 +518,7 @@ impl Db {
             parent_id: parent.clone(),
             pos: 0,
         };
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         if !parent.is_empty() {
             let prow: Option<(String, String)> = conn
                 .query_row(
@@ -524,7 +570,7 @@ impl Db {
     }
 
     pub fn list_collections(&self) -> anyhow::Result<Vec<Collection>> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id,kind,title,poster_url,poster_file,created_at,parent_id,pos FROM collections ORDER BY pos, created_at",
         )?;
@@ -536,7 +582,7 @@ impl Db {
 
     /// Solo hijas directas de una colección raíz, ordenadas por posición visual.
     pub fn list_children(&self, parent: &str) -> anyhow::Result<Vec<Collection>> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id,kind,title,poster_url,poster_file,created_at,parent_id,pos FROM collections WHERE parent_id=? ORDER BY pos, created_at",
         )?;
@@ -547,7 +593,7 @@ impl Db {
     }
 
     pub fn get_collection(&self, id: &str) -> anyhow::Result<Option<Collection>> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id,kind,title,poster_url,poster_file,created_at,parent_id,pos FROM collections WHERE id=?",
         )?;
@@ -562,7 +608,7 @@ impl Db {
         poster_url: Option<&str>,
         kind: Option<&str>,
     ) -> anyhow::Result<bool> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         if let Some(t) = title {
             let t: String = t.trim().chars().take(128).collect();
             if t.is_empty() {
@@ -614,7 +660,7 @@ impl Db {
     }
 
     pub fn set_poster_file(&self, id: &str, file: &str) -> anyhow::Result<bool> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let n = conn.execute(
             "UPDATE collections SET poster_file=? WHERE id=?",
             params![file, id],
@@ -625,7 +671,7 @@ impl Db {
     /// Borra la agrupación (y sus hijas en cascada), nunca los archivos:
     /// los episodios vuelven a quedar solo en Biblioteca.
     pub fn delete_collection(&self, id: &str) -> anyhow::Result<bool> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         // Hijas primero (solo 2 niveles).
         let kids: Vec<String> = conn
             .prepare("SELECT id FROM collections WHERE parent_id=?")?
@@ -653,7 +699,7 @@ impl Db {
         label: &str,
         pos: i64,
     ) -> anyhow::Result<()> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let target: Option<(String, String)> = conn
             .query_row(
                 "SELECT kind, parent_id FROM collections WHERE id=?",
@@ -724,7 +770,7 @@ impl Db {
     /// Reordena los episodios de una hoja según el orden dado de paths.
     /// `order[i]` queda con `pos=i`. Ignora paths que no estén en la colección.
     pub fn reorder_items(&self, collection_id: &str, order: &[String]) -> anyhow::Result<()> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let exists: i64 = conn.query_row(
             "SELECT COUNT(*) FROM collections WHERE id=?",
             [collection_id],
@@ -745,7 +791,7 @@ impl Db {
     /// Reordena las hijas (temporadas/películas) de una serie raíz.
     /// `order[i]` queda con `pos=i`. Ignora ids que no sean hijas de `root_id`.
     pub fn reorder_children(&self, root_id: &str, order: &[String]) -> anyhow::Result<()> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let exists: i64 = conn.query_row(
             "SELECT COUNT(*) FROM collections WHERE id=?",
             [root_id],
@@ -764,7 +810,7 @@ impl Db {
     }
 
     pub fn remove_item(&self, collection_id: &str, file_path: &str) -> anyhow::Result<bool> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let n = conn.execute(
             "DELETE FROM collection_items WHERE collection_id=? AND file_path=?",
             params![collection_id, file_path],
@@ -818,7 +864,7 @@ impl Db {
     /// Los episodios viven en las hojas; la raíz con hijas no tiene items
     /// directos (se rechazan en `add_item`).
     pub fn collection_detail(&self, id: &str) -> anyhow::Result<Option<CollectionDetail>> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let col: Option<Collection> = conn
             .query_row(
                 "SELECT id,kind,title,poster_url,poster_file,created_at,parent_id,pos FROM collections WHERE id=?",
@@ -856,11 +902,54 @@ impl Db {
 
     /// ¿En qué colección está un archivo? (máx 1 por regla de mover).
     pub fn collection_of(&self, file_path: &str) -> anyhow::Result<Option<String>> {
-        let conn = self.inner.lock().unwrap();
+        let conn = self.conn()?;
         let mut stmt =
             conn.prepare("SELECT collection_id FROM collection_items WHERE file_path=?")?;
         let mut rows = stmt.query_map([file_path], |r| r.get(0))?;
         Ok(rows.next().transpose()?)
+    }
+
+    /// MED-02: resumen agregado para `GET /api/collections` sin N+1.
+    /// Por colección: (nº total de items propios + de hijas, nº de hijas).
+    /// 3 queries fijas en vez de 1 + 2×N.
+    pub fn collections_summary(&self) -> anyhow::Result<HashMap<String, (i64, i64)>> {
+        let conn = self.conn()?;
+        let mut own: HashMap<String, i64> = HashMap::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT collection_id, COUNT(*) FROM collection_items GROUP BY collection_id",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+            for r in rows {
+                let (k, v) = r?;
+                own.insert(k, v);
+            }
+        }
+        let mut kids_of: HashMap<String, Vec<String>> = HashMap::new();
+        let mut all_ids = Vec::new();
+        {
+            let mut stmt = conn.prepare("SELECT id, parent_id FROM collections")?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            for r in rows {
+                let (id, parent) = r?;
+                if !parent.is_empty() {
+                    kids_of.entry(parent.clone()).or_default().push(id.clone());
+                }
+                all_ids.push(id);
+            }
+        }
+        let mut out = HashMap::new();
+        for id in all_ids {
+            let kids: &[String] = kids_of.get(&id).map(Vec::as_slice).unwrap_or(&[]);
+            let n = own.get(&id).copied().unwrap_or(0)
+                + kids
+                    .iter()
+                    .map(|k| own.get(k).copied().unwrap_or(0))
+                    .sum::<i64>();
+            out.insert(id, (n, kids.len() as i64));
+        }
+        Ok(out)
     }
 }
 
@@ -944,6 +1033,48 @@ mod tests {
         // Settings test
         db.set_setting("active_doc", "doc-123")?;
         assert_eq!(db.get_setting("active_doc")?, Some("doc-123".into()));
+        Ok(())
+    }
+
+    #[test]
+    fn collections_summary_paginacion_y_conteos() -> anyhow::Result<()> {
+        // MED-02: agregado sin N+1 + listados paginados + conteos.
+        let db = Db::open_in_memory()?;
+        for (p, h) in [
+            ("a/cap1.mkv", "h1"),
+            ("a/cap2.mkv", "h2"),
+            ("a/cap3.mkv", "h3"),
+        ] {
+            db.upsert_file(&FileRow {
+                path: p.into(),
+                hash: h.into(),
+                size: 10,
+                mime: "video/x-matroska".into(),
+                policy: Policy::StreamOnly,
+                host_id: "host1".into(),
+                tag: format!("t{h}"),
+                title: String::new(),
+                watched: false,
+                kind: FILE_KIND_MEDIA.into(),
+            })?;
+        }
+        let root = db.create_collection("series", "Serie", "")?;
+        let t1 = db.create_collection("season", "T1", &root.id)?;
+        db.add_item(&t1.id, "a/cap1.mkv", "", "", 0)?;
+        db.add_item(&t1.id, "a/cap2.mkv", "", "", 0)?;
+        let sum = db.collections_summary()?;
+        assert_eq!(sum.get(&t1.id), Some(&(2, 0)));
+        // Raíz: 2 propios-de-hija + 1 hija.
+        assert_eq!(sum.get(&root.id), Some(&(2, 1)));
+        // Paginación: 3 archivos, páginas de 2.
+        assert_eq!(db.list_files_by_kind_paged(FILE_KIND_MEDIA, 2, 0)?.len(), 2);
+        assert_eq!(db.list_files_by_kind_paged(FILE_KIND_MEDIA, 2, 2)?.len(), 1);
+        assert_eq!(
+            db.list_files_by_kind_paged(FILE_KIND_MEDIA, 10, 0)?.len(),
+            3
+        );
+        let (total, media, storage) = db.count_files()?;
+        assert_eq!((total, media, storage), (3, 3, 0));
         Ok(())
     }
 
